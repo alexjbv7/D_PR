@@ -286,6 +286,33 @@ services:
     networks: [los-ojos-net]
     restart: unless-stopped
 
+  # ── Execution Engine ─────────────────────────────────────────────────────────
+  execution-engine:
+    build:
+      context: ..
+      dockerfile: platform/services/execution-engine/Dockerfile
+    hostname: execution-engine
+    ports:
+      - "8010:8000"
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL:               redis://redis:6379/0
+      POSTGRES_DSN:            postgresql://trading:trading@postgres:5432/trading_db
+      # broker creds (set in .env)
+      ALPACA_ENABLED:    "true"
+      ALPACA_PAPER:      "true"
+      CCXT_ENABLED:      "false"
+      CCXT_TESTNET:      "true"
+      # risk
+      RISK_REQUIRE_PAPER: "true"
+    depends_on:
+      kafka:    { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    networks: [los-ojos-net]
+    restart: unless-stopped
+
   # ── SEC Research ─────────────────────────────────────────────────────────────
   sec-research:
     build:
