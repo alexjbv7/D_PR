@@ -7,8 +7,10 @@ Available:
 """
 from .base import BrokerAdapter, AccountInfo, BrokerError, BrokerTimeoutError
 from .alpaca import AlpacaAdapter, AlpacaConfig
+from .ccxt_adapter import CCXTAdapter, CCXTConfig
 
 __all__ = [
     "BrokerAdapter", "AccountInfo", "BrokerError", "BrokerTimeoutError",
     "AlpacaAdapter", "AlpacaConfig",
+    "CCXTAdapter",   "CCXTConfig",
 ]
