@@ -26,6 +26,16 @@ from .events import (
 )
 from .signals import TradeSignal, SignalDirection, PositionSide
 from .market_data import NormalizedTick, OHLCVBar, OrderBook
+from .orders import (
+    OrderIntent,
+    OrderResult,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    TimeInForce,
+    Fill,
+    Position,
+)
 
 __all__ = [
     "BaseEvent",
@@ -54,4 +64,7 @@ __all__ = [
     "KafkaTopics",
     "TradeSignal", "SignalDirection", "PositionSide",
     "NormalizedTick", "OHLCVBar", "OrderBook",
+    # order domain
+    "OrderIntent", "OrderResult", "OrderSide", "OrderStatus",
+    "OrderType", "TimeInForce", "Fill", "Position",
 ]
