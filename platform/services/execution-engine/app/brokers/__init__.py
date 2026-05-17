@@ -6,5 +6,9 @@ Available:
   CCXTAdapter    — Binance / Bybit / Kraken via ccxt (PASO D)
 """
 from .base import BrokerAdapter, AccountInfo, BrokerError, BrokerTimeoutError
+from .alpaca import AlpacaAdapter, AlpacaConfig
 
-__all__ = ["BrokerAdapter", "AccountInfo", "BrokerError", "BrokerTimeoutError"]
+__all__ = [
+    "BrokerAdapter", "AccountInfo", "BrokerError", "BrokerTimeoutError",
+    "AlpacaAdapter", "AlpacaConfig",
+]
