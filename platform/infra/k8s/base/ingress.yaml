@@ -1,0 +1,93 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: los-ojos-ingress
+  namespace: los-ojos
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # WebSocket support for realtime-signal
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: los-ojos.local
+      http:
+        paths:
+          # Frontend (catch-all)
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
+          # API routes → services
+          - path: /api/market
+            pathType: Prefix
+            backend:
+              service:
+                name: market-intelligence
+                port:
+                  number: 8000
+          - path: /api/macro
+            pathType: Prefix
+            backend:
+              service:
+                name: macroeconomic
+                port:
+                  number: 8000
+          - path: /api/onchain
+            pathType: Prefix
+            backend:
+              service:
+                name: onchain-analysis
+                port:
+                  number: 8000
+          - path: /api/context
+            pathType: Prefix
+            backend:
+              service:
+                name: context-engine
+                port:
+                  number: 8000
+          - path: /api/features
+            pathType: Prefix
+            backend:
+              service:
+                name: ml-feature-store
+                port:
+                  number: 8000
+          - path: /api/signals
+            pathType: Prefix
+            backend:
+              service:
+                name: realtime-signal
+                port:
+                  number: 8000
+          - path: /api/orchestrator
+            pathType: Prefix
+            backend:
+              service:
+                name: strategy-orchestrator
+                port:
+                  number: 8000
+          - path: /api/sec
+            pathType: Prefix
+            backend:
+              service:
+                name: sec-research
+                port:
+                  number: 8000
+          # WebSocket upgrade for realtime-signal
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: realtime-signal
+                port:
+                  number: 8000

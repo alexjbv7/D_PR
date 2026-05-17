@@ -1,0 +1,79 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Entornos virtuales
+quant_bot_env/
+venv/
+.venv/
+env/
+.env/
+
+# Datos y cache
+data/raw/
+data/processed/
+cache/
+*.parquet
+*.csv
+*.h5
+*.feather
+
+# Modelos entrenados (artifacts van en el registry, no en git)
+artifacts/models/
+*.joblib
+*.pkl
+*.pt
+*.onnx
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Secretos
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*_secret*
+*_credentials*
+
+# Docker
+.docker/
+
+# Kubernetes
+*.kubeconfig
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Node (frontend)
+platform/frontend/node_modules/
+platform/frontend/dist/
+platform/frontend/.vite/
+
+# Logs
+*.log
+logs/
+
+# Imágenes generadas (plots van en research/plots/ solo localmente)
+research/plots/*.png

@@ -1,0 +1,149 @@
+# -----------------------------------------------------------------------
+# Internal ClusterIP services for each microservice
+# -----------------------------------------------------------------------
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: market-intelligence
+  namespace: los-ojos
+  labels:
+    app: market-intelligence
+spec:
+  selector:
+    app: market-intelligence
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: macroeconomic
+  namespace: los-ojos
+  labels:
+    app: macroeconomic
+spec:
+  selector:
+    app: macroeconomic
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: onchain-analysis
+  namespace: los-ojos
+  labels:
+    app: onchain-analysis
+spec:
+  selector:
+    app: onchain-analysis
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: context-engine
+  namespace: los-ojos
+  labels:
+    app: context-engine
+spec:
+  selector:
+    app: context-engine
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-feature-store
+  namespace: los-ojos
+  labels:
+    app: ml-feature-store
+spec:
+  selector:
+    app: ml-feature-store
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: realtime-signal
+  namespace: los-ojos
+  labels:
+    app: realtime-signal
+spec:
+  selector:
+    app: realtime-signal
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: strategy-orchestrator
+  namespace: los-ojos
+  labels:
+    app: strategy-orchestrator
+spec:
+  selector:
+    app: strategy-orchestrator
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sec-research
+  namespace: los-ojos
+  labels:
+    app: sec-research
+spec:
+  selector:
+    app: sec-research
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+
+---
+# Frontend — NodePort (or LoadBalancer in cloud)
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: los-ojos
+  labels:
+    app: frontend
+spec:
+  type: ClusterIP
+  selector:
+    app: frontend
+  ports:
+    - port: 80
+      targetPort: 80
+      name: http

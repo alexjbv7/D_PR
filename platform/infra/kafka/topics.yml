@@ -1,0 +1,101 @@
+# =============================================================================
+# Los Ojos — Kafka Topics Configuration
+# =============================================================================
+# Crear topics manualmente (si auto-create está desactivado):
+#   kafka-topics.sh --create --bootstrap-server localhost:9092 \
+#     --topic los_ojos.market.data --partitions 4 --replication-factor 1
+# =============================================================================
+
+topics:
+  # ── Market Intelligence ──────────────────────────────────────────────────
+  - name: los_ojos.market.data
+    partitions: 4
+    replication: 1
+    config:
+      retention.ms: 604800000    # 7 days
+      compression.type: lz4
+
+  - name: los_ojos.market.orderbook
+    partitions: 4
+    replication: 1
+    config:
+      retention.ms: 86400000     # 1 day (high volume)
+      compression.type: lz4
+
+  - name: los_ojos.market.funding
+    partitions: 2
+    replication: 1
+    config:
+      retention.ms: 604800000
+
+  # ── Macroeconomic ────────────────────────────────────────────────────────
+  - name: los_ojos.macro.indicators
+    partitions: 1
+    replication: 1
+    config:
+      retention.ms: 2592000000   # 30 days
+
+  - name: los_ojos.macro.regime
+    partitions: 1
+    replication: 1
+    config:
+      retention.ms: 2592000000
+
+  - name: los_ojos.macro.recession_alert
+    partitions: 1
+    replication: 1
+    config:
+      retention.ms: 2592000000
+
+  # ── On-chain ─────────────────────────────────────────────────────────────
+  - name: los_ojos.onchain.whale_alert
+    partitions: 2
+    replication: 1
+    config:
+      retention.ms: 604800000
+
+  - name: los_ojos.onchain.smart_money
+    partitions: 2
+    replication: 1
+    config:
+      retention.ms: 604800000
+
+  # ── Context Engine ────────────────────────────────────────────────────────
+  - name: los_ojos.context.regime
+    partitions: 2
+    replication: 1
+    config:
+      retention.ms: 604800000
+
+  - name: los_ojos.context.anomaly
+    partitions: 2
+    replication: 1
+    config:
+      retention.ms: 604800000
+
+  # ── ML Feature Store ──────────────────────────────────────────────────────
+  - name: los_ojos.ml.feature_vector
+    partitions: 4
+    replication: 1
+    config:
+      retention.ms: 86400000     # 1 day
+
+  # ── Signals & Bot ─────────────────────────────────────────────────────────
+  - name: los_ojos.signals.trading
+    partitions: 4
+    replication: 1
+    config:
+      retention.ms: 2592000000
+
+  - name: los_ojos.bot.kill_switch
+    partitions: 1
+    replication: 1
+    config:
+      retention.ms: 86400000
+
+  # ── DLQ (Dead Letter Queue) ───────────────────────────────────────────────
+  - name: los_ojos.dlq
+    partitions: 1
+    replication: 1
+    config:
+      retention.ms: 2592000000

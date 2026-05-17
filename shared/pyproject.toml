@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quant-shared"
+version = "0.1.0"
+description = "Shared library — feature definitions, schemas, model registry (quant_bot monorepo)"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.0",
+    "pydantic>=2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["quant_shared*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+testpaths = ["tests"]

@@ -1,0 +1,233 @@
+name: Platform — Services CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "platform/**"
+      - "shared/**"
+      - ".github/workflows/platform-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "platform/**"
+      - "shared/**"
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+
+jobs:
+  # ── Shared lib ─────────────────────────────────────────────────────────────
+  lint-shared:
+    name: Lint — shared lib
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install shared + linters
+        run: |
+          pip install -e shared/
+          pip install ruff mypy
+      - name: Ruff lint
+        run: ruff check shared/quant_shared
+      - name: Type check
+        run: mypy shared/quant_shared --ignore-missing-imports
+
+  # ── Python services ─────────────────────────────────────────────────────────
+  test-services:
+    name: Test — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: lint-shared
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - market-intelligence
+          - macroeconomic
+          - onchain-analysis
+          - context-engine
+          - ml-feature-store
+          - realtime-signal
+          - strategy-orchestrator
+          - sec-research
+          - openbb-adapter
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: platform/services/${{ matrix.service }}/requirements.txt
+
+      - name: Install quant_shared + service deps
+        run: |
+          pip install -e shared/
+          pip install -e platform/libs/shared
+          pip install -r platform/services/${{ matrix.service }}/requirements.txt
+          pip install pytest pytest-asyncio pytest-cov
+
+      - name: Ruff lint
+        run: |
+          pip install ruff
+          ruff check platform/services/${{ matrix.service }}/app
+
+      - name: Run tests
+        run: |
+          if [ -d "platform/services/${{ matrix.service }}/tests" ] && \
+             ls platform/services/${{ matrix.service }}/tests/test_*.py 2>/dev/null; then
+            cd platform/services/${{ matrix.service }}
+            python -m pytest tests/ --cov=app --cov-report=xml -q --tb=short
+          else
+            echo "No tests — skipping"
+          fi
+
+      - name: Upload coverage
+        if: always()
+        uses: codecov/codecov-action@v4
+        with:
+          file: platform/services/${{ matrix.service }}/coverage.xml
+          flags: ${{ matrix.service }}
+          fail_ci_if_error: false
+
+  # ── Frontend ────────────────────────────────────────────────────────────────
+  test-frontend:
+    name: Test — frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: platform/frontend/package-lock.json
+      - name: Install dependencies
+        working-directory: platform/frontend
+        run: npm ci
+      - name: Lint
+        working-directory: platform/frontend
+        run: npm run lint
+      - name: Type check
+        working-directory: platform/frontend
+        run: npm run typecheck
+      - name: Build
+        working-directory: platform/frontend
+        run: npm run build
+        env:
+          VITE_WS_URL: ws://localhost:8005/ws
+          VITE_ORCHESTRATOR_URL: http://localhost:8007
+
+  # ── Docker build ────────────────────────────────────────────────────────────
+  docker-build:
+    name: Docker build — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: test-services
+    if: github.ref == 'refs/heads/main'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - market-intelligence
+          - macroeconomic
+          - onchain-analysis
+          - context-engine
+          - ml-feature-store
+          - realtime-signal
+          - strategy-orchestrator
+          - sec-research
+          - openbb-adapter
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build image (no push)
+        uses: docker/build-push-action@v5
+        with:
+          context: .                      # raíz del monorepo (acceso a shared/)
+          file: platform/services/${{ matrix.service }}/Dockerfile
+          push: false
+          tags: quant-bot/${{ matrix.service }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Integration tests ───────────────────────────────────────────────────────
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    needs: [test-services, test-frontend]
+    if: github.ref == 'refs/heads/main'
+
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_USER: los_ojos
+          POSTGRES_PASSWORD: los_ojos_dev
+          POSTGRES_DB: los_ojos
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      kafka:
+        image: confluentinc/cp-kafka:7.6.0
+        env:
+          KAFKA_BROKER_ID: 1
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_NODE_ID: 1
+          KAFKA_CONTROLLER_QUORUM_VOTERS: "1@localhost:29093"
+          KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+        ports: ["9092:9092"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install deps
+        run: |
+          pip install -e shared/
+          pip install -e platform/libs/shared
+          pip install pytest pytest-asyncio asyncpg aioredis aiokafka
+      - name: Apply DB schema
+        env:
+          PGPASSWORD: los_ojos_dev
+        run: psql -h localhost -U los_ojos -d los_ojos -f platform/infra/sql/schema.sql
+      - name: Run integration tests
+        env:
+          POSTGRES_DSN: postgresql://los_ojos:los_ojos_dev@localhost:5432/los_ojos
+          REDIS_URL: redis://localhost:6379/0
+          KAFKA_SERVERS: localhost:9092
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          if [ -d "platform/tests/integration" ]; then
+            pytest platform/tests/integration -v --tb=short
+          else
+            echo "No integration tests yet"
+          fi
