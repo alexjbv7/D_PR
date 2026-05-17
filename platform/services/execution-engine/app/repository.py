@@ -1,0 +1,401 @@
+"""
+Repository — persistence layer for the execution-engine.
+========================================================
+
+Two implementations are provided behind a common :class:`Repository` ABC:
+
+* :class:`MemoryRepository`
+    In-memory dict-based.  Used for tests and for paper-trading bootstrap
+    (process-local state, no external DB required).
+
+* :class:`PostgresRepository`
+    ``asyncpg``-backed implementation that writes to the ``orders.*`` schema
+    defined in ``migrations/001_execution_engine.sql``.
+
+The risk-gate, the reconciler, and the (future) FastAPI service all depend
+on the abstract :class:`Repository`, never on the Postgres class directly.
+"""
+from __future__ import annotations
+
+import logging
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Any, Optional
+
+from quant_shared.schemas.orders import (
+    Fill,
+    OrderIntent,
+    OrderResult,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Position,
+    TimeInForce,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Repository ABC
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class RiskDecision:
+    """
+    Persisted alongside an :class:`OrderIntent`.
+
+    Parameters
+    ----------
+    approved : bool
+        True if the intent passed every risk check.
+    reason : str
+        Human-readable explanation of the decision.
+    breach : str, optional
+        Tag identifying which limit was breached
+        (``"per_symbol_cap"``, ``"daily_dd"``, ``"cash_buffer"``, …).
+    """
+    approved: bool
+    reason:   str = ""
+    breach:   Optional[str] = None
+
+
+class Repository(ABC):
+    """Abstract persistence interface used by risk-gate, reconciler, REST."""
+
+    # ---- intents ----
+
+    @abstractmethod
+    async def save_intent(self, intent: OrderIntent, decision: RiskDecision) -> None:
+        """Persist an :class:`OrderIntent` together with its risk decision."""
+
+    @abstractmethod
+    async def get_intent(self, intent_id: str) -> Optional[OrderIntent]:
+        ...
+
+    # ---- results ----
+
+    @abstractmethod
+    async def save_result(self, result: OrderResult) -> None:
+        """Persist (insert or update) an :class:`OrderResult` by ``result_id``."""
+
+    @abstractmethod
+    async def list_recent_results(self, limit: int = 50) -> list[OrderResult]:
+        ...
+
+    # ---- fills ----
+
+    @abstractmethod
+    async def save_fill(self, fill: Fill) -> None:
+        ...
+
+    # ---- positions ----
+
+    @abstractmethod
+    async def upsert_position(self, pos: Position) -> None:
+        """Insert or update by ``(venue, symbol)`` composite key."""
+
+    @abstractmethod
+    async def remove_position(self, venue: str, symbol: str) -> None:
+        ...
+
+    @abstractmethod
+    async def get_open_positions(self, venue: Optional[str] = None) -> list[Position]:
+        ...
+
+
+# ---------------------------------------------------------------------------
+# MemoryRepository
+# ---------------------------------------------------------------------------
+
+class MemoryRepository(Repository):
+    """In-memory implementation; suitable for tests and paper-mode bootstrap."""
+
+    def __init__(self):
+        self._intents:   dict[str, tuple[OrderIntent, RiskDecision]] = {}
+        self._results:   dict[str, OrderResult] = {}
+        self._fills:     list[Fill] = []
+        self._positions: dict[tuple[str, str], Position] = {}
+
+    # ---- intents ----
+
+    async def save_intent(self, intent: OrderIntent, decision: RiskDecision) -> None:
+        self._intents[intent.intent_id] = (intent, decision)
+
+    async def get_intent(self, intent_id: str) -> Optional[OrderIntent]:
+        entry = self._intents.get(intent_id)
+        return entry[0] if entry else None
+
+    async def get_intent_decision(self, intent_id: str) -> Optional[RiskDecision]:
+        """Convenience for tests; not on the ABC."""
+        entry = self._intents.get(intent_id)
+        return entry[1] if entry else None
+
+    # ---- results ----
+
+    async def save_result(self, result: OrderResult) -> None:
+        self._results[result.result_id] = result
+
+    async def list_recent_results(self, limit: int = 50) -> list[OrderResult]:
+        ordered = sorted(
+            self._results.values(),
+            key=lambda r: r.ts_updated,
+            reverse=True,
+        )
+        return ordered[:limit]
+
+    # ---- fills ----
+
+    async def save_fill(self, fill: Fill) -> None:
+        self._fills.append(fill)
+
+    # ---- positions ----
+
+    async def upsert_position(self, pos: Position) -> None:
+        self._positions[(pos.venue, pos.symbol)] = pos
+
+    async def remove_position(self, venue: str, symbol: str) -> None:
+        self._positions.pop((venue, symbol), None)
+
+    async def get_open_positions(self, venue: Optional[str] = None) -> list[Position]:
+        if venue is None:
+            return list(self._positions.values())
+        return [p for (v, _s), p in self._positions.items() if v == venue]
+
+
+# ---------------------------------------------------------------------------
+# PostgresRepository
+# ---------------------------------------------------------------------------
+
+class PostgresRepository(Repository):
+    """
+    ``asyncpg``-backed implementation.
+
+    Parameters
+    ----------
+    pool : asyncpg.Pool
+        A connected asyncpg pool.  The caller owns the pool's lifecycle.
+
+    Notes
+    -----
+    asyncpg returns ``Decimal`` for ``NUMERIC`` columns and ``datetime`` for
+    ``TIMESTAMPTZ`` columns, so no extra coercion is required.  UUIDs are
+    represented as ``str`` on the Python side (UUID v7 from
+    :func:`quant_shared.schemas.orders._uuid7`); we cast with ``::uuid`` in
+    the SQL where needed.
+    """
+
+    def __init__(self, pool: Any):
+        if pool is None:
+            raise ValueError("pool must not be None")
+        self._pool = pool
+
+    # ---- helpers ----
+
+    def _conn(self):
+        return self._pool.acquire()
+
+    # ---- intents ----
+
+    async def save_intent(self, intent: OrderIntent, decision: RiskDecision) -> None:
+        sql = """
+            INSERT INTO orders.intents (
+                intent_id, signal_id, strategy, symbol, side, qty, order_type,
+                limit_price, sl_price, tp_price, tif, venue,
+                kelly_fraction, target_risk_pct, p_win,
+                risk_decision, risk_reason, risk_breach, ts
+            )
+            VALUES (
+                $1::uuid, NULLIF($2,'')::uuid, $3, $4, $5, $6, $7,
+                $8, $9, $10, $11, $12,
+                $13, $14, $15,
+                $16, $17, $18, $19
+            )
+            ON CONFLICT (intent_id) DO UPDATE SET
+                risk_decision = EXCLUDED.risk_decision,
+                risk_reason   = EXCLUDED.risk_reason,
+                risk_breach   = EXCLUDED.risk_breach
+        """
+        async with self._conn() as conn:
+            await conn.execute(
+                sql,
+                intent.intent_id, intent.signal_id, intent.strategy,
+                intent.symbol, intent.side.value, intent.qty,
+                intent.order_type.value, intent.limit_price, intent.sl_price,
+                intent.tp_price, intent.tif.value, intent.venue,
+                Decimal(str(intent.kelly_fraction)),
+                Decimal(str(intent.target_risk_pct)),
+                Decimal(str(intent.p_win)),
+                "approved" if decision.approved else "rejected",
+                decision.reason, decision.breach, intent.ts,
+            )
+
+    async def get_intent(self, intent_id: str) -> Optional[OrderIntent]:
+        sql = "SELECT * FROM orders.intents WHERE intent_id = $1::uuid"
+        async with self._conn() as conn:
+            row = await conn.fetchrow(sql, intent_id)
+        return _row_to_intent(row) if row else None
+
+    # ---- results ----
+
+    async def save_result(self, result: OrderResult) -> None:
+        sql = """
+            INSERT INTO orders.results (
+                result_id, intent_id, broker_id, symbol, side, status,
+                qty, filled_qty, avg_price, venue, reject_reason,
+                ts_submitted, ts_updated
+            )
+            VALUES (
+                $1::uuid, $2::uuid, $3, $4, $5, $6,
+                $7, $8, $9, $10, $11, $12, $13
+            )
+            ON CONFLICT (result_id) DO UPDATE SET
+                broker_id     = EXCLUDED.broker_id,
+                status        = EXCLUDED.status,
+                filled_qty    = EXCLUDED.filled_qty,
+                avg_price     = EXCLUDED.avg_price,
+                reject_reason = EXCLUDED.reject_reason,
+                ts_updated    = EXCLUDED.ts_updated
+        """
+        async with self._conn() as conn:
+            await conn.execute(
+                sql,
+                result.result_id, result.intent_id, result.broker_id or None,
+                result.symbol, result.side.value, result.status.value,
+                result.qty, result.filled_qty, result.avg_price,
+                result.venue, result.reject_reason,
+                result.ts_submitted, result.ts_updated,
+            )
+
+    async def list_recent_results(self, limit: int = 50) -> list[OrderResult]:
+        sql = "SELECT * FROM orders.results ORDER BY ts_updated DESC LIMIT $1"
+        async with self._conn() as conn:
+            rows = await conn.fetch(sql, limit)
+        return [_row_to_result(r) for r in rows]
+
+    # ---- fills ----
+
+    async def save_fill(self, fill: Fill) -> None:
+        sql = """
+            INSERT INTO orders.fills (
+                fill_id, order_id, symbol, side, qty, price,
+                fee, fee_asset, venue, ts
+            )
+            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        """
+        async with self._conn() as conn:
+            await conn.execute(
+                sql,
+                fill.fill_id, fill.order_id, fill.symbol, fill.side.value,
+                fill.qty, fill.price, fill.fee, fill.fee_asset,
+                fill.venue, fill.ts,
+            )
+
+    # ---- positions ----
+
+    async def upsert_position(self, pos: Position) -> None:
+        sql = """
+            INSERT INTO orders.positions (
+                venue, symbol, side, qty, avg_entry,
+                current_price, unrealized_pnl, margin_used, ts_opened
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (venue, symbol) DO UPDATE SET
+                side           = EXCLUDED.side,
+                qty            = EXCLUDED.qty,
+                avg_entry      = EXCLUDED.avg_entry,
+                current_price  = EXCLUDED.current_price,
+                unrealized_pnl = EXCLUDED.unrealized_pnl,
+                margin_used    = EXCLUDED.margin_used
+        """
+        async with self._conn() as conn:
+            await conn.execute(
+                sql,
+                pos.venue, pos.symbol, pos.side.value,
+                pos.qty, pos.avg_entry,
+                pos.current_price, pos.unrealized_pnl, pos.margin_used,
+                pos.ts_opened,
+            )
+
+    async def remove_position(self, venue: str, symbol: str) -> None:
+        sql = "DELETE FROM orders.positions WHERE venue = $1 AND symbol = $2"
+        async with self._conn() as conn:
+            await conn.execute(sql, venue, symbol)
+
+    async def get_open_positions(self, venue: Optional[str] = None) -> list[Position]:
+        if venue is None:
+            sql = "SELECT * FROM orders.positions"
+            args: tuple = ()
+        else:
+            sql = "SELECT * FROM orders.positions WHERE venue = $1"
+            args = (venue,)
+        async with self._conn() as conn:
+            rows = await conn.fetch(sql, *args)
+        return [_row_to_position(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Row → domain object helpers
+# ---------------------------------------------------------------------------
+
+def _row_to_intent(row: Any) -> OrderIntent:
+    return OrderIntent(
+        intent_id=str(row["intent_id"]),
+        signal_id=str(row["signal_id"]) if row["signal_id"] else "",
+        strategy=row["strategy"] or "",
+        symbol=row["symbol"],
+        side=OrderSide(row["side"]),
+        qty=row["qty"],
+        order_type=OrderType(row["order_type"]),
+        limit_price=row["limit_price"],
+        sl_price=row["sl_price"],
+        tp_price=row["tp_price"],
+        tif=TimeInForce(row["tif"]),
+        venue=row["venue"] or "",
+        kelly_fraction=float(row["kelly_fraction"] or 0),
+        target_risk_pct=float(row["target_risk_pct"] or 0),
+        p_win=float(row["p_win"] or 0),
+        ts=_ensure_utc(row["ts"]),
+    )
+
+
+def _row_to_result(row: Any) -> OrderResult:
+    return OrderResult(
+        result_id=str(row["result_id"]),
+        intent_id=str(row["intent_id"]),
+        broker_id=row["broker_id"] or "",
+        symbol=row["symbol"],
+        side=OrderSide(row["side"]),
+        status=OrderStatus(row["status"]),
+        qty=row["qty"],
+        filled_qty=row["filled_qty"],
+        avg_price=row["avg_price"],
+        venue=row["venue"] or "",
+        reject_reason=row["reject_reason"],
+        ts_submitted=_ensure_utc(row["ts_submitted"]),
+        ts_updated=_ensure_utc(row["ts_updated"]),
+    )
+
+
+def _row_to_position(row: Any) -> Position:
+    return Position(
+        symbol=row["symbol"],
+        side=OrderSide(row["side"]),
+        qty=row["qty"],
+        avg_entry=row["avg_entry"],
+        current_price=row["current_price"],
+        unrealized_pnl=row["unrealized_pnl"],
+        margin_used=row["margin_used"],
+        venue=row["venue"],
+        ts_opened=_ensure_utc(row["ts_opened"]) if row["ts_opened"] else None,
+        ts_updated=_ensure_utc(row["ts_updated"]),
+    )
+
+
+def _ensure_utc(value: Any) -> datetime:
+    """asyncpg returns tz-aware UTC for TIMESTAMPTZ, but be defensive."""
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc) if isinstance(value, datetime) else value
