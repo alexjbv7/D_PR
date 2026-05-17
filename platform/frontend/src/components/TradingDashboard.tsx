@@ -17,9 +17,10 @@
 import React, { useCallback, useState } from "react";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { BotConfigPanel } from "./BotConfigPanel";
+import ExecutionPanel from "./ExecutionPanel";
 import type {
   TradingSignal, WhaleAlert, RegimeState, MacroSnapshot,
-  PnLSummary, Position, WSMessage, BotConfig,
+  PnLSummary, WSMessage, BotConfig,
 } from "../types";
 import { DIRECTION_META, REGIME_META } from "../types";
 
@@ -215,29 +216,6 @@ function MacroPanel({ macro }: { macro: MacroSnapshot | null }) {
   );
 }
 
-function PositionRow({ pos }: { pos: Position }) {
-  const pnlColor = pos.pnl_usd >= 0 ? "text-green-400" : "text-red-400";
-  return (
-    <tr className="border-t border-slate-800 hover:bg-slate-800/50">
-      <td className="py-2 px-3 font-mono text-white text-sm">{pos.symbol}</td>
-      <td className="py-2 px-3 text-slate-400 text-xs">{pos.strategy}</td>
-      <td className="py-2 px-3" style={{ color: DIRECTION_META[pos.direction].color }}>
-        {DIRECTION_META[pos.direction].icon} {DIRECTION_META[pos.direction].label}
-      </td>
-      <td className="py-2 px-3 font-mono text-slate-300 text-sm">
-        ${pos.entry_price.toFixed(2)}
-      </td>
-      <td className="py-2 px-3 font-mono text-slate-300 text-sm">
-        ${pos.current_price.toFixed(2)}
-      </td>
-      <td className={`py-2 px-3 font-mono text-sm font-bold ${pnlColor}`}>
-        {pos.pnl_usd >= 0 ? "+" : ""}${pos.pnl_usd.toFixed(0)} ({pos.pnl_pct >= 0 ? "+" : ""}{pos.pnl_pct.toFixed(2)}%)
-      </td>
-      <td className="py-2 px-3 text-slate-500 text-xs">{pos.regime}</td>
-    </tr>
-  );
-}
-
 // ── Main Dashboard ────────────────────────────────────────────────────────────
 
 const MOCK_PNL: PnLSummary = {
@@ -255,7 +233,6 @@ export default function TradingDashboard() {
   const [whaleAlerts, setWhaleAlerts] = useState<WhaleAlert[]>([]);
   const [regime,    setRegime]    = useState<RegimeState | null>(null);
   const [macro,     setMacro]     = useState<MacroSnapshot | null>(null);
-  const [positions, setPositions] = useState<Position[]>([]);
   const [selectedSymbol] = useState("BTCUSDT");
   const [killSwitchActive, setKillSwitchActive] = useState(false);
   const [showBotConfig, setShowBotConfig] = useState(false);
@@ -425,27 +402,9 @@ export default function TradingDashboard() {
           </div>
         </div>
 
-        {/* Positions */}
-        <div className="col-span-12 bg-slate-900 rounded-xl border border-slate-800 p-4">
-          <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wide mb-3">
-            Open Positions
-          </h2>
-          {positions.length === 0 ? (
-            <div className="text-slate-600 text-sm text-center py-4">No open positions</div>
-          ) : (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-xs text-slate-500 uppercase tracking-wide">
-                  {["Symbol", "Strategy", "Side", "Entry", "Current", "P&L", "Regime"].map((h) => (
-                    <th key={h} className="text-left py-2 px-3">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {positions.map((p, i) => <PositionRow key={i} pos={p} />)}
-              </tbody>
-            </table>
-          )}
+        {/* Execution Engine — positions + recent orders + kill-switch */}
+        <div className="col-span-12">
+          <ExecutionPanel onKillSwitchChange={setKillSwitchActive} />
         </div>
       </div>
     </div>

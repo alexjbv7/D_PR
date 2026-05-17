@@ -193,4 +193,81 @@ export type WSEventType =
   | "RecessionAlertEvent"
   | "RegimeUpdateEvent"
   | "AnomalyEvent"
-  | "KillSwitchEvent";
+  | "KillSwitchEvent"
+  | "ExecutionResult";
+
+// ============================================================================
+// Execution Engine — REST shapes
+// Mirrors platform/services/execution-engine/app/main.py endpoints.
+// All numeric monetary values come over the wire as strings (Decimal → str)
+// per quant_shared.schemas.orders convention.
+// ============================================================================
+
+export type OrderSideStr   = "buy" | "sell";
+export type OrderStatusStr =
+  | "pending"
+  | "submitted"
+  | "partial"
+  | "filled"
+  | "cancelled"
+  | "rejected"
+  | "expired";
+
+export interface ExecutionCounters {
+  signals_seen:  number;
+  intents_built: number;
+  approved:      number;
+  rejected:      number;
+  submitted:     number;
+  submit_errors: number;
+}
+
+export interface ExecutionHealth {
+  status:       string;
+  service:      string;
+  ts:           string;
+  venues:       string[];
+  kill_switch:  boolean;
+  counters:     ExecutionCounters;
+}
+
+export interface ExecutionPosition {
+  symbol:          string;
+  side:            OrderSideStr;
+  qty:             string;            // Decimal as string
+  avg_entry:       string;
+  current_price:   string | null;
+  unrealized_pnl:  string | null;
+  margin_used:     string | null;
+  venue:           string;
+  ts_opened:       string | null;
+  ts_updated:      string;
+}
+
+export interface ExecutionOrderResult {
+  result_id:      string;
+  intent_id:      string;
+  broker_id:      string;
+  symbol:         string;
+  side:           OrderSideStr;
+  status:         OrderStatusStr;
+  qty:            string;
+  filled_qty:     string;
+  avg_price:      string | null;
+  fills:          unknown[];
+  reject_reason:  string | null;
+  ts_submitted:   string;
+  ts_updated:     string;
+  venue:          string;
+}
+
+export interface ExecutionAccount {
+  venue:        string;
+  account_id:   string;
+  equity:       string;
+  cash:         string;
+  margin_used:  string;
+  pnl_day:      string;
+  currency:     string;
+  is_paper:     boolean;
+}
