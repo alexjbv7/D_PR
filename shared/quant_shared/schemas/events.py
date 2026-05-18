@@ -27,7 +27,8 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from decimal import Decimal
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -358,6 +359,57 @@ class KillSwitchEvent(BaseEvent):
 # TOPIC REGISTRY
 # ===========================================================================
 
+# ===========================================================================
+# CORPORATE ACTIONS & UNIVERSE (Semana 4)
+# ===========================================================================
+
+class CorporateActionEvent(BaseEvent):
+    """Emitted by market-intelligence cron. Consumed by execution-engine and
+    feature-engine to adjust positions and rolling features respectively.
+
+    ``split_ratio = split_to / split_from`` for *_split events.
+    For forward splits ratio > 1; for reverse splits ratio < 1.
+    """
+
+    source: str = "market-intelligence"
+    ca_id: str                          # UUID v7
+    alpaca_id: Optional[str] = None
+    symbol: str
+    ca_type: Literal[
+        "forward_split",
+        "reverse_split",
+        "stock_dividend",
+        "cash_dividend",
+        "merger",
+        "spinoff",
+        "name_change",
+    ]
+    ex_ts: datetime                     # UTC — adjustment applies to bars with ts < ex_ts
+    split_ratio: Optional[Decimal] = None   # split_to / split_from
+    cash_amount: Optional[Decimal] = None
+    stock_amount: Optional[Decimal] = None
+    new_symbol: Optional[str] = None    # for mergers / name_changes / spinoffs
+    is_provisional: bool = True
+    emitted_ts: datetime = Field(default_factory=_utcnow)
+
+
+class UniverseUpdateEvent(BaseEvent):
+    """Emitted when a symbol changes listing status.
+
+    ``change_type`` values:
+    - ``new_listing``     : symbol newly active in /v2/assets
+    - ``delisting``       : confirmed delisted after 3-day inactive buffer
+    - ``metadata_update`` : fractionable / tradable / exchange flags changed
+    """
+
+    source: str = "market-intelligence"
+    symbol: str
+    asset_class: str = "us_equity"
+    change_type: Literal["new_listing", "delisting", "metadata_update"]
+    delisted_ts: Optional[datetime] = None
+    emitted_ts: datetime = Field(default_factory=_utcnow)
+
+
 class KafkaTopics:
     """Central registry of all Kafka topic names (authoritative).
 
@@ -403,6 +455,10 @@ class KafkaTopics:
 
     # ML features
     ML_FEATURE_VECTOR   = "los_ojos.ml.feature_vector"
+
+    # Universe & Corporate Actions (Semana 4)
+    CORPORATE_ACTIONS   = "los_ojos.corporate_actions"
+    UNIVERSE_UPDATES    = "los_ojos.universe.updates"
 
     # System
     ANOMALY             = "los_ojos.context.anomaly"

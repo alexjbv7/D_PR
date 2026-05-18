@@ -105,6 +105,30 @@ class Repository(ABC):
     async def get_open_positions(self, venue: Optional[str] = None) -> list[Position]:
         ...
 
+    @abstractmethod
+    async def get_open_positions_for_symbol(self, symbol: str) -> list[Position]:
+        """Return all open positions for a specific symbol across all venues."""
+        ...
+
+    # ---- corporate actions (idempotency) ----
+
+    @abstractmethod
+    async def was_ca_applied(self, ca_id: str, target: str) -> bool:
+        """True if this CA was already applied to ``target`` (e.g. "positions")."""
+        ...
+
+    @abstractmethod
+    async def record_ca_application(
+        self,
+        ca_id: str,
+        target: str,
+        rows_affected: int,
+        success: bool = True,
+        error_msg: Optional[str] = None,
+    ) -> None:
+        """Persist that a CA was applied to ``target``."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # MemoryRepository
@@ -113,11 +137,12 @@ class Repository(ABC):
 class MemoryRepository(Repository):
     """In-memory implementation; suitable for tests and paper-mode bootstrap."""
 
-    def __init__(self):
-        self._intents:   dict[str, tuple[OrderIntent, RiskDecision]] = {}
-        self._results:   dict[str, OrderResult] = {}
-        self._fills:     list[Fill] = []
-        self._positions: dict[tuple[str, str], Position] = {}
+    def __init__(self) -> None:
+        self._intents:    dict[str, tuple[OrderIntent, RiskDecision]] = {}
+        self._results:    dict[str, OrderResult] = {}
+        self._fills:      list[Fill] = []
+        self._positions:  dict[tuple[str, str], Position] = {}
+        self._ca_applied: dict[tuple[str, str], bool] = {}
 
     # ---- intents ----
 
@@ -164,6 +189,25 @@ class MemoryRepository(Repository):
             return list(self._positions.values())
         return [p for (v, _s), p in self._positions.items() if v == venue]
 
+    async def get_open_positions_for_symbol(self, symbol: str) -> list[Position]:
+        return [p for (_v, s), p in self._positions.items() if s == symbol]
+
+    # ---- corporate actions ----
+
+    async def was_ca_applied(self, ca_id: str, target: str) -> bool:
+        return self._ca_applied.get((ca_id, target), False)
+
+    async def record_ca_application(
+        self,
+        ca_id: str,
+        target: str,
+        rows_affected: int,
+        success: bool = True,
+        error_msg: Optional[str] = None,
+    ) -> None:
+        if success:
+            self._ca_applied[(ca_id, target)] = True
+
 
 # ---------------------------------------------------------------------------
 # PostgresRepository
@@ -194,7 +238,7 @@ class PostgresRepository(Repository):
 
     # ---- helpers ----
 
-    def _conn(self):
+    def _conn(self) -> Any:  # asyncpg PoolConnectionProxy — no public stub
         return self._pool.acquire()
 
     # ---- intents ----
@@ -327,13 +371,51 @@ class PostgresRepository(Repository):
     async def get_open_positions(self, venue: Optional[str] = None) -> list[Position]:
         if venue is None:
             sql = "SELECT * FROM orders.positions"
-            args: tuple = ()
+            args: tuple[object, ...] = ()
         else:
             sql = "SELECT * FROM orders.positions WHERE venue = $1"
             args = (venue,)
         async with self._conn() as conn:
             rows = await conn.fetch(sql, *args)
         return [_row_to_position(r) for r in rows]
+
+    async def get_open_positions_for_symbol(self, symbol: str) -> list[Position]:
+        sql = "SELECT * FROM orders.positions WHERE symbol = $1"
+        async with self._conn() as conn:
+            rows = await conn.fetch(sql, symbol)
+        return [_row_to_position(r) for r in rows]
+
+    # ---- corporate actions (idempotency) ----
+
+    async def was_ca_applied(self, ca_id: str, target: str) -> bool:
+        sql = """
+            SELECT 1 FROM market.corporate_actions_applied
+             WHERE ca_id = $1 AND target = $2 AND success = TRUE
+        """
+        async with self._conn() as conn:
+            row = await conn.fetchrow(sql, ca_id, target)
+        return row is not None
+
+    async def record_ca_application(
+        self,
+        ca_id: str,
+        target: str,
+        rows_affected: int,
+        success: bool = True,
+        error_msg: Optional[str] = None,
+    ) -> None:
+        sql = """
+            INSERT INTO market.corporate_actions_applied
+                (ca_id, target, rows_affected, success, error_msg)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (ca_id, target) DO UPDATE SET
+                ts_applied    = NOW(),
+                rows_affected = EXCLUDED.rows_affected,
+                success       = EXCLUDED.success,
+                error_msg     = EXCLUDED.error_msg
+        """
+        async with self._conn() as conn:
+            await conn.execute(sql, ca_id, target, rows_affected, success, error_msg)
 
 
 # ---------------------------------------------------------------------------

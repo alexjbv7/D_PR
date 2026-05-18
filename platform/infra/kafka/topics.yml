@@ -93,6 +93,20 @@ topics:
     config:
       retention.ms: 86400000
 
+  # ── Universe & Corporate Actions (Semana 4) ──────────────────────────────
+  - name: los_ojos.corporate_actions
+    partitions: 4
+    replication: 1
+    config:
+      retention.ms: 31536000000   # 1 year
+      cleanup.policy: compact     # last value per ca_id key (provisional → confirmed)
+
+  - name: los_ojos.universe.updates
+    partitions: 2
+    replication: 1
+    config:
+      retention.ms: 31536000000   # 1 year
+
   # ── DLQ (Dead Letter Queue) ───────────────────────────────────────────────
   - name: los_ojos.dlq
     partitions: 1
