@@ -12,11 +12,12 @@ the :class:`Repository`.
 
 Checks (evaluated in order; first breach short-circuits)
 --------------------------------------------------------
-1. **daily_dd**         — pnl_day ≤ -daily_dd_kill_pct × equity  →  reject
-2. **per_symbol_cap**   — new notional in symbol > per_symbol_cap_pct × equity
-3. **per_venue_cap**    — new notional in venue  > per_venue_cap_pct × equity
-4. **cash_buffer**      — would leave cash < min_cash_buffer_pct × equity
-5. **broker_paper**     — block live submission when ``require_paper`` is set
+1. **require_paper**    — block live submission when ``require_paper`` is set
+2. **daily_dd**         — pnl_day ≤ -daily_dd_kill_pct × equity  →  reject
+3. **per_symbol_cap**   — new notional in symbol > per_symbol_cap_pct × equity
+4. **per_venue_cap**    — new notional in venue  > per_venue_cap_pct × equity
+5. **market_open**      — US equities outside RTH  →  reject (``market_closed``)
+6. **cash_buffer**      — would leave cash < min_cash_buffer_pct × equity
 
 References
 ----------
@@ -30,6 +31,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
 
+from quant_shared.calendar import market_calendar
 from quant_shared.schemas.orders import OrderIntent, OrderSide, Position
 
 from .brokers.base import AccountInfo
@@ -205,7 +207,18 @@ class RiskGate:
                 ),
             )
 
-        # ---- 5. cash buffer ----
+        # ---- 5. market open (US equities RTH; crypto 24/7) ----
+        if not market_calendar.is_open(intent.symbol, intent.ts):
+            return RiskDecision(
+                approved=False,
+                breach="market_closed",
+                reason=(
+                    f"Market closed for {intent.symbol} at "
+                    f"{intent.ts.isoformat()}"
+                ),
+            )
+
+        # ---- 6. cash buffer ----
         required_buffer = Decimal(str(self.config.min_cash_buffer_pct)) * account.equity
         if intent.side == OrderSide.BUY and intent_notional > 0:
             projected_cash = account.cash - intent_notional

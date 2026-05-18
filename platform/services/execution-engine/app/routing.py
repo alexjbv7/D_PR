@@ -20,40 +20,16 @@ connected adapters and calls ``close_all()`` on shutdown.
 from __future__ import annotations
 
 import logging
-import re
 from typing import Optional
 
 from quant_shared.schemas.orders import OrderIntent, OrderResult, Position
+from quant_shared.symbols import is_equity
 
 from .brokers.base import BrokerAdapter, BrokerError
 
 logger = logging.getLogger(__name__)
 
-
-# Heuristic for identifying equities: 1-5 uppercase letters, no digits,
-# and no recognised crypto-quote suffix.
-_EQUITY_RE = re.compile(r"^[A-Z]{1,5}$")
-_CRYPTO_QUOTES = ("USDT", "USDC", "USD", "BTC", "ETH", "EUR", "GBP")
-
-
-def is_equity(symbol: str) -> bool:
-    """
-    Heuristic: True if ``symbol`` looks like a US equity / ETF ticker.
-
-    >>> is_equity("AAPL")
-    True
-    >>> is_equity("BTCUSDT")
-    False
-    >>> is_equity("BTC/USDT")
-    False
-    """
-    sym = symbol.upper()
-    if "/" in sym or ":" in sym:
-        return False
-    for q in _CRYPTO_QUOTES:
-        if sym.endswith(q) and len(sym) > len(q):
-            return False
-    return bool(_EQUITY_RE.match(sym))
+__all__ = ["Router", "is_equity"]
 
 
 class Router:

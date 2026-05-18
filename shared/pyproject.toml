@@ -11,6 +11,15 @@ dependencies = [
     "numpy>=1.26",
     "pandas>=2.0",
     "pydantic>=2.0",
+    "pandas_market_calendars>=4.4,<5",  # pin major: holidays anuales, revisar en S12
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-benchmark>=4.0",
+    "mypy>=1.8",
 ]
 
 [tool.setuptools.packages.find]
@@ -21,3 +30,12 @@ include = ["quant_shared*"]
 asyncio_mode = "auto"
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["quant_shared.calendar"]
+
+[[tool.mypy.overrides]]
+module = ["pandas.*", "pandas_market_calendars.*"]
+ignore_missing_imports = true
