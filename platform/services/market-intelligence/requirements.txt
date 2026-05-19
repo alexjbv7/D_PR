@@ -3,6 +3,7 @@ uvicorn[standard]>=0.30.1
 pydantic>=2.7.1
 pydantic-settings>=2.3.0
 httpx>=0.27.0
+respx>=0.21.0  # HTTP mocking in tests (test_ca_fetcher.py)
 websockets>=12.0
 aiokafka>=0.11.0
 redis[hiredis]>=5.0.6
