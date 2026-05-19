@@ -153,6 +153,12 @@ class ExecutionService:
         self._counters["submitted"] += 1
         await self.repo.save_result(result)
 
+        for fill in result.fills:
+            tagged = fill.model_copy(
+                update={"account_id": account.account_id, "venue": venue},
+            )
+            await self.repo.save_fill(tagged)
+
         if self.result_emitter is not None:
             try:
                 await self.result_emitter(result)

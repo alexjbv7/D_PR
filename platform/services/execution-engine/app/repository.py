@@ -20,9 +20,12 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
+
+from quant_shared.schemas.orders import _uuid7
 
 from quant_shared.schemas.orders import (
     Fill,
@@ -36,6 +39,16 @@ from quant_shared.schemas.orders import (
 )
 
 logger = logging.getLogger(__name__)
+
+_ET = ZoneInfo("America/New_York")
+
+
+@dataclass(frozen=True)
+class _PositionActionRow:
+    account_id:    str
+    symbol:        str
+    side:          str
+    trade_date_et: date
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +142,33 @@ class Repository(ABC):
         """Persist that a CA was applied to ``target``."""
         ...
 
+    # ---- PDT day-trade ledger ----
+
+    @abstractmethod
+    async def count_day_trades(
+        self,
+        account_id: str,
+        since_date_et: date,
+        until_date_et: date,
+    ) -> int:
+        """
+        Count distinct (symbol, trade_date_et) with both buy and sell actions
+        in the inclusive ET date range.
+        """
+
+    @abstractmethod
+    async def record_position_action(
+        self,
+        account_id: str,
+        symbol: str,
+        side: OrderSide,
+        qty: Decimal,
+        notional: Optional[Decimal],
+        fill_id: str,
+        ts_utc: datetime,
+    ) -> None:
+        """Append one fill-derived action for PDT counting."""
+
 
 # ---------------------------------------------------------------------------
 # MemoryRepository
@@ -143,6 +183,7 @@ class MemoryRepository(Repository):
         self._fills:      list[Fill] = []
         self._positions:  dict[tuple[str, str], Position] = {}
         self._ca_applied: dict[tuple[str, str], bool] = {}
+        self._position_actions: list[_PositionActionRow] = []
 
     # ---- intents ----
 
@@ -175,6 +216,16 @@ class MemoryRepository(Repository):
 
     async def save_fill(self, fill: Fill) -> None:
         self._fills.append(fill)
+        if fill.account_id:
+            await self.record_position_action(
+                account_id=fill.account_id,
+                symbol=fill.symbol,
+                side=fill.side,
+                qty=fill.qty,
+                notional=fill.notional,
+                fill_id=fill.fill_id,
+                ts_utc=fill.ts,
+            )
 
     # ---- positions ----
 
@@ -207,6 +258,42 @@ class MemoryRepository(Repository):
     ) -> None:
         if success:
             self._ca_applied[(ca_id, target)] = True
+
+    async def count_day_trades(
+        self,
+        account_id: str,
+        since_date_et: date,
+        until_date_et: date,
+    ) -> int:
+        by_key: dict[tuple[str, date], set[str]] = {}
+        for row in self._position_actions:
+            if row.account_id != account_id:
+                continue
+            if row.trade_date_et < since_date_et or row.trade_date_et > until_date_et:
+                continue
+            key = (row.symbol, row.trade_date_et)
+            by_key.setdefault(key, set()).add(row.side)
+        return sum(1 for sides in by_key.values() if "buy" in sides and "sell" in sides)
+
+    async def record_position_action(
+        self,
+        account_id: str,
+        symbol: str,
+        side: OrderSide,
+        qty: Decimal,
+        notional: Optional[Decimal],
+        fill_id: str,
+        ts_utc: datetime,
+    ) -> None:
+        trade_date_et = ts_utc.astimezone(_ET).date()
+        self._position_actions.append(
+            _PositionActionRow(
+                account_id=account_id,
+                symbol=symbol,
+                side=side.value,
+                trade_date_et=trade_date_et,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +423,16 @@ class PostgresRepository(Repository):
                 fill.qty, fill.price, fill.fee, fill.fee_asset,
                 fill.venue, fill.ts,
             )
+        if fill.account_id:
+            await self.record_position_action(
+                account_id=fill.account_id,
+                symbol=fill.symbol,
+                side=fill.side,
+                qty=fill.qty,
+                notional=fill.notional,
+                fill_id=fill.fill_id,
+                ts_utc=fill.ts,
+            )
 
     # ---- positions ----
 
@@ -416,6 +513,58 @@ class PostgresRepository(Repository):
         """
         async with self._conn() as conn:
             await conn.execute(sql, ca_id, target, rows_affected, success, error_msg)
+
+    async def count_day_trades(
+        self,
+        account_id: str,
+        since_date_et: date,
+        until_date_et: date,
+    ) -> int:
+        sql = """
+            SELECT COUNT(*) FROM (
+                SELECT symbol, trade_date_et
+                  FROM risk.position_actions
+                 WHERE account_id = $1
+                   AND trade_date_et BETWEEN $2 AND $3
+                 GROUP BY symbol, trade_date_et
+                HAVING SUM(CASE WHEN side = 'buy' THEN 1 ELSE 0 END) > 0
+                   AND SUM(CASE WHEN side = 'sell' THEN 1 ELSE 0 END) > 0
+            ) day_trades
+        """
+        async with self._conn() as conn:
+            row = await conn.fetchrow(sql, account_id, since_date_et, until_date_et)
+        return int(row[0]) if row else 0
+
+    async def record_position_action(
+        self,
+        account_id: str,
+        symbol: str,
+        side: OrderSide,
+        qty: Decimal,
+        notional: Optional[Decimal],
+        fill_id: str,
+        ts_utc: datetime,
+    ) -> None:
+        trade_date_et = ts_utc.astimezone(_ET).date()
+        sql = """
+            INSERT INTO risk.position_actions
+                (action_id, account_id, symbol, side, qty, notional,
+                 fill_id, ts_utc, trade_date_et)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        """
+        async with self._conn() as conn:
+            await conn.execute(
+                sql,
+                _uuid7(),
+                account_id,
+                symbol,
+                side.value,
+                qty,
+                notional,
+                fill_id,
+                ts_utc,
+                trade_date_et,
+            )
 
 
 # ---------------------------------------------------------------------------

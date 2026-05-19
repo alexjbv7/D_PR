@@ -145,7 +145,8 @@ class OrderIntent(BaseModel):
     strategy:    str          = ""
     symbol:      str
     side:        OrderSide
-    qty:         Decimal      = Field(gt=Decimal("0"))
+    qty:         Optional[Decimal] = Field(default=None, gt=Decimal("0"))
+    notional:    Optional[Decimal] = Field(default=None, gt=Decimal("0"))
     order_type:  OrderType    = OrderType.LIMIT_MAKER
     limit_price:    Optional[Decimal] = None
     sl_price:       Optional[Decimal] = None
@@ -163,7 +164,7 @@ class OrderIntent(BaseModel):
     p_win:           float = 0.0
 
     @field_validator(
-        "qty", "limit_price", "sl_price", "tp_price",
+        "qty", "notional", "limit_price", "sl_price", "tp_price",
         "trail_percent", "trail_price",
         mode="before",
     )
@@ -172,6 +173,15 @@ class OrderIntent(BaseModel):
         if v is None:
             return None
         return Decimal(str(v))
+
+    @model_validator(mode="after")
+    def _qty_xor_notional(self) -> "OrderIntent":
+        if (self.qty is None) == (self.notional is None):
+            raise ValueError(
+                "OrderIntent requires exactly one of (qty, notional), "
+                "not both nor neither"
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_trailing_and_bracket(self) -> "OrderIntent":
@@ -227,8 +237,9 @@ class Fill(BaseModel):
     fee:       Decimal   = Decimal("0")
     fee_asset: str       = "USD"
     ts:        datetime  = Field(default_factory=_utcnow)
-    venue:     str       = ""
-    raw:       dict      = Field(default_factory=dict)
+    venue:      str       = ""
+    account_id: str       = ""
+    raw:        dict      = Field(default_factory=dict)
 
     @field_validator("qty", "price", "fee", mode="before")
     @classmethod

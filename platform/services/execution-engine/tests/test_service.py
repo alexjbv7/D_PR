@@ -30,7 +30,7 @@ from app.service import ExecutionService
 # Fixtures
 # ---------------------------------------------------------------------------
 
-def _make_adapter(venue: str, *, equity="100000", price="65000",
+def _make_adapter(venue: str, *, equity="100000", price="1000",
                   is_paper=True) -> MagicMock:
     a = MagicMock()
     a.venue          = venue
@@ -45,15 +45,19 @@ def _make_adapter(venue: str, *, equity="100000", price="65000",
     ))
     a.get_last_price = AsyncMock(return_value=Decimal(price))
     a.get_positions  = AsyncMock(return_value=[])
-    a.submit         = AsyncMock(side_effect=lambda intent: OrderResult(
-        intent_id=intent.intent_id,
-        broker_id=f"{venue}-001",
-        symbol=intent.symbol,
-        side=intent.side,
-        status=OrderStatus.SUBMITTED,
-        qty=intent.qty,
-        venue=venue,
-    ))
+    def _submit(intent: OrderIntent) -> OrderResult:
+        qty = intent.qty if intent.qty is not None else Decimal("1")
+        return OrderResult(
+            intent_id=intent.intent_id,
+            broker_id=f"{venue}-001",
+            symbol=intent.symbol,
+            side=intent.side,
+            status=OrderStatus.SUBMITTED,
+            qty=qty,
+            venue=venue,
+        )
+
+    a.submit = AsyncMock(side_effect=_submit)
     return a
 
 
@@ -214,6 +218,7 @@ async def test_default_venue_resolution_for_equity(repo):
 
     sig = _signal(symbol="AAPL")
     sig.pop("venue", None)
+    sig["ts"] = "2026-05-19T14:00:00+00:00"
     result = await svc.handle_signal(sig)
     assert result is not None
     assert result.venue == "alpaca"

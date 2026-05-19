@@ -33,7 +33,7 @@ def test_long_signal_produces_buy_intent():
     intent = translate_signal(
         _signal(direction=1),
         equity=Decimal("100000"),
-        current_price=Decimal("65000"),
+        current_price=Decimal("1000"),
         default_venue="binance",
     )
     assert intent is not None
@@ -57,7 +57,29 @@ def test_short_signal_produces_sell_intent():
 
 
 def test_qty_sized_from_kelly_equity_and_price():
-    # kelly 0.02 × 100k = 2000 notional ; / 65000 = 0.03076923...
+    # kelly 0.02 × 100k = 2000 notional ; / 1000 = 2 shares
+    intent = translate_signal(
+        _signal(position_size=0.02),
+        equity=Decimal("100000"),
+        current_price=Decimal("1000"),
+        default_venue="binance",
+    )
+    assert intent is not None
+    expected = Decimal("2000") / Decimal("1000")
+    assert intent.qty == expected
+
+
+def test_limit_price_equals_current_price():
+    intent = translate_signal(
+        _signal(), equity=Decimal("100000"),
+        current_price=Decimal("1000"), default_venue="binance",
+    )
+    assert intent is not None
+    assert intent.limit_price == Decimal("1000")
+
+
+def test_fractional_notional_when_below_one_share():
+    # 2000 notional cannot buy 1 unit at 65000 → MARKET notional order
     intent = translate_signal(
         _signal(position_size=0.02),
         equity=Decimal("100000"),
@@ -65,17 +87,9 @@ def test_qty_sized_from_kelly_equity_and_price():
         default_venue="binance",
     )
     assert intent is not None
-    expected = Decimal("2000") / Decimal("65000")
-    assert intent.qty == expected
-
-
-def test_limit_price_equals_current_price():
-    intent = translate_signal(
-        _signal(), equity=Decimal("100000"),
-        current_price=Decimal("65000"), default_venue="binance",
-    )
-    assert intent is not None
-    assert intent.limit_price == Decimal("65000")
+    assert intent.notional == Decimal("2000")
+    assert intent.qty is None
+    assert intent.order_type == OrderType.MARKET
 
 
 def test_p_win_carried_as_metadata():

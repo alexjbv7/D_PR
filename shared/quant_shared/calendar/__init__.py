@@ -14,3 +14,6 @@ __all__ = [
     "market_calendar",
     "session_phase_value",
 ]
+
+# Re-exported via market_calendar instance methods:
+# is_trading_day, last_n_trading_dates

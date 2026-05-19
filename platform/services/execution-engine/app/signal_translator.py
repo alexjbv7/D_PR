@@ -103,21 +103,33 @@ def translate_signal(
         )
         return None
 
-    qty = notional / current_price
-
     side = OrderSide.BUY if direction > 0 else OrderSide.SELL
 
-    return OrderIntent(
+    common: dict = dict(
         signal_id=str(signal.get("event_id", "")),
         strategy=str(signal.get("strategy", "")),
         symbol=str(signal.get("symbol", "")),
         side=side,
-        qty=qty,
-        order_type=OrderType.LIMIT_MAKER,
-        limit_price=current_price,
         tif=TimeInForce.GTC,
         venue=str(signal.get("venue", "") or default_venue),
         kelly_fraction=float(kelly),
         target_risk_pct=float(signal.get("target_risk_pct", 0) or 0),
         p_win=float(signal.get("p_win", 0) or 0),
+    )
+    if signal.get("ts"):
+        common["ts"] = signal["ts"]
+
+    if notional < current_price:
+        return OrderIntent(
+            **common,
+            notional=notional,
+            order_type=OrderType.MARKET,
+        )
+
+    qty = notional / current_price
+    return OrderIntent(
+        **common,
+        qty=qty,
+        order_type=OrderType.LIMIT_MAKER,
+        limit_price=current_price,
     )

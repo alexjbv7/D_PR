@@ -32,8 +32,9 @@ from decimal import Decimal
 from typing import Optional
 
 from quant_shared.calendar import market_calendar
-from quant_shared.schemas.orders import OrderIntent, OrderSide, Position
+from quant_shared.schemas.orders import OrderIntent, OrderSide, OrderType, Position
 
+from ._pdt.pdt_tracker import PDTTracker
 from .brokers.base import AccountInfo
 from .repository import Repository, RiskDecision
 
@@ -104,8 +105,9 @@ class RiskGate:
     """
 
     def __init__(self, config: RiskConfig, repository: Repository):
-        self.config = config
-        self.repo   = repository
+        self.config      = config
+        self.repo        = repository
+        self.pdt_tracker = PDTTracker(repository)
 
     # -----------------------------------------------------------------------
     # Public API
@@ -218,7 +220,32 @@ class RiskGate:
                 ),
             )
 
-        # ---- 6. cash buffer ----
+        # ---- 6. PDT rule (equities, equity < $26k buffer) ----
+        pdt = await self.pdt_tracker.check(
+            account_id=account.account_id,
+            symbol=intent.symbol,
+            equity=account.equity,
+            intent_ts=intent.ts,
+        )
+        if pdt.blocked:
+            return RiskDecision(
+                approved=False,
+                breach="pdt_rule",
+                reason=pdt.reason,
+            )
+
+        # ---- 7. extended hours requires LIMIT (Alpaca ETH) ----
+        if intent.extended_hours and intent.order_type != OrderType.LIMIT:
+            return RiskDecision(
+                approved=False,
+                breach="extended_hours_requires_limit",
+                reason=(
+                    f"extended_hours=True requires order_type=LIMIT, "
+                    f"got {intent.order_type.value}"
+                ),
+            )
+
+        # ---- 8. cash buffer ----
         required_buffer = Decimal(str(self.config.min_cash_buffer_pct)) * account.equity
         if intent.side == OrderSide.BUY and intent_notional > 0:
             projected_cash = account.cash - intent_notional
@@ -237,9 +264,11 @@ class RiskGate:
 
     @staticmethod
     def _estimate_notional(intent: OrderIntent) -> Decimal:
-        if intent.limit_price is None:
-            return Decimal("0")
-        return intent.qty * intent.limit_price
+        if intent.notional is not None:
+            return intent.notional
+        if intent.qty is not None and intent.limit_price is not None:
+            return intent.qty * intent.limit_price
+        return Decimal("0")
 
 
 # ---------------------------------------------------------------------------

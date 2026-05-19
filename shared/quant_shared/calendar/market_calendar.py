@@ -241,6 +241,46 @@ class MarketCalendar:
         open_utc, close_utc = self._bounds_utc(symbol, _et_date(ts_utc))
         return classify_equity_phase(ts_utc, open_utc, close_utc)
 
+    def is_trading_day(self, symbol: str, session_date: date) -> bool:
+        """True if the US equity exchange had a regular session on ``session_date`` (ET)."""
+        if not is_equity(symbol):
+            return True
+        self._refresh_cache_if_needed(through=session_date)
+        return self._row_for_date(self._exchange_for_symbol(symbol), session_date) is not None
+
+    def last_n_trading_dates(
+        self,
+        symbol: str,
+        ts_utc: datetime,
+        n: int,
+    ) -> list[date]:
+        """
+        Return the ``n`` most recent NYSE/NASDAQ session dates (ET) ending at or
+        before the reference instant.
+
+        If ``ts_utc`` falls on a session day before the official close, that
+        calendar day is excluded (day-trade counting uses completed sessions).
+        """
+        if n <= 0:
+            return []
+        ts_utc = _ensure_utc(ts_utc)
+        if not is_equity(symbol):
+            return []
+
+        cur = _et_date(ts_utc)
+        _, close_utc = self._bounds_utc(symbol, cur)
+        if close_utc is not None and ts_utc < close_utc:
+            cur -= timedelta(days=1)
+
+        dates: list[date] = []
+        attempts = 0
+        while len(dates) < n and attempts < 30:
+            attempts += 1
+            if self.is_trading_day(symbol, cur):
+                dates.append(cur)
+            cur -= timedelta(days=1)
+        return list(reversed(dates))
+
     def is_half_day(self, symbol: str, ts_utc: datetime) -> bool:
         """True on early-close sessions (e.g. day after Thanksgiving)."""
         ts_utc = _ensure_utc(ts_utc)

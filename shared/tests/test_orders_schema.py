@@ -57,6 +57,27 @@ def test_bracket_rejects_limit_maker_with_sl_tp() -> None:
         )
 
 
+def test_qty_notional_mutex_both_set() -> None:
+    with pytest.raises(ValidationError, match="exactly one"):
+        _intent(qty=Decimal("10"), notional=Decimal("50"))
+
+
+def test_qty_notional_mutex_neither_set() -> None:
+    with pytest.raises(ValidationError, match="exactly one"):
+        OrderIntent(symbol="AAPL", side=OrderSide.BUY)  # type: ignore[call-arg]
+
+
+def test_notional_only_ok() -> None:
+    o = OrderIntent(
+        symbol="AAPL",
+        side=OrderSide.BUY,
+        notional=Decimal("50"),
+        order_type=OrderType.MARKET,
+    )
+    assert o.notional == Decimal("50")
+    assert o.qty is None
+
+
 def test_bracket_limit_with_sl_tp_ok() -> None:
     o = _intent(
         order_type=OrderType.LIMIT,

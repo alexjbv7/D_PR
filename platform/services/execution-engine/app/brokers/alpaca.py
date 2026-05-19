@@ -365,12 +365,42 @@ class AlpacaAdapter(BrokerAdapter):
         tif: Any,
     ) -> Any:
         """MARKET / LIMIT / LIMIT_MAKER / STOP_LIMIT — pre-S5 behaviour."""
-        qty  = float(intent.qty)
+        from .alpaca_errors import FractionalShareNotAllowedError
+
         coid = intent.intent_id
+        ext  = intent.extended_hours
+
+        if intent.notional is not None:
+            if intent.order_type != OrderType.MARKET:
+                raise FractionalShareNotAllowedError(
+                    f"Fractional notional orders require MARKET; "
+                    f"got {intent.order_type.value}"
+                )
+            if intent.side == OrderSide.SELL:
+                raise FractionalShareNotAllowedError(
+                    "Fractional notional SELL is not supported by Alpaca"
+                )
+            return _AC_Market(
+                symbol=alpaca_sym,
+                notional=float(intent.notional),
+                side=side,
+                time_in_force=tif,
+                extended_hours=ext,
+                client_order_id=coid,
+            )
+
+        if intent.qty is None:
+            raise BrokerError("OrderIntent.qty is required for non-notional orders")
+
+        qty = float(intent.qty)
 
         if intent.order_type == OrderType.MARKET:
             return _AC_Market(
-                symbol=alpaca_sym, qty=qty, side=side, time_in_force=tif,
+                symbol=alpaca_sym,
+                qty=qty,
+                side=side,
+                time_in_force=tif,
+                extended_hours=ext,
                 client_order_id=coid,
             )
         if intent.order_type in (OrderType.LIMIT, OrderType.LIMIT_MAKER):
@@ -384,6 +414,7 @@ class AlpacaAdapter(BrokerAdapter):
                 side=side,
                 time_in_force=tif,
                 limit_price=float(intent.limit_price),
+                extended_hours=ext,
                 client_order_id=coid,
             )
         if intent.order_type == OrderType.STOP_LIMIT:
