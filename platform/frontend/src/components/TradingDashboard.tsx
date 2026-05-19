@@ -11,13 +11,18 @@
  *   ├─────────────┴──────────┬───────────┴─────────────────┤
  *   │ On-chain / Whale panel │ Order Flow + Funding panel  │
  *   ├────────────────────────┴─────────────────────────────┤
- *   │ Positions table                                       │
+ *   │ Execution Engine (positions + orders + kill-switch)  │
+ *   ├──────────────────────────────────────────────────────┤
+ *   │ SEC Research (filings + institutional positions)     │
  *   └──────────────────────────────────────────────────────┘
  */
 import React, { useCallback, useState } from "react";
 import { useWebSocket } from "../hooks/useWebSocket";
+import { useOHLCV } from "../hooks/useOHLCV";
 import { BotConfigPanel } from "./BotConfigPanel";
 import ExecutionPanel from "./ExecutionPanel";
+import SECPanel from "./SECPanel";
+import { TradingChart } from "./TradingChart";
 import type {
   TradingSignal, WhaleAlert, RegimeState, MacroSnapshot,
   PnLSummary, WSMessage, BotConfig,
@@ -228,14 +233,27 @@ const MOCK_PNL: PnLSummary = {
   n_trades_30d: 147,
 };
 
+// Interval options the user can select
+const INTERVALS = ["1h", "4h", "1d"] as const;
+type Interval = (typeof INTERVALS)[number];
+
 export default function TradingDashboard() {
   const [signals,   setSignals]   = useState<TradingSignal[]>([]);
   const [whaleAlerts, setWhaleAlerts] = useState<WhaleAlert[]>([]);
   const [regime,    setRegime]    = useState<RegimeState | null>(null);
   const [macro,     setMacro]     = useState<MacroSnapshot | null>(null);
   const [selectedSymbol] = useState("BTCUSDT");
+  const [chartInterval, setChartInterval] = useState<Interval>("1h");
   const [killSwitchActive, setKillSwitchActive] = useState(false);
   const [showBotConfig, setShowBotConfig] = useState(false);
+
+  // OHLCV data for the chart — fetched from openbb-adapter
+  const { bars: ohlcvBars, loading: chartLoading, error: chartError } = useOHLCV({
+    symbol:       selectedSymbol,
+    interval:     chartInterval,
+    lookbackDays: chartInterval === "1d" ? 365 : chartInterval === "4h" ? 180 : 30,
+    refreshMs:    chartInterval === "1h" ? 60_000 : 300_000,
+  });
 
   const handleMessage = useCallback((msg: WSMessage) => {
     switch (msg.type) {
@@ -335,14 +353,52 @@ export default function TradingDashboard() {
       {/* Main grid */}
       <div className={`grid grid-cols-12 gap-4 p-4 transition-all ${showBotConfig ? "mr-80" : ""}`}>
 
-        {/* Chart placeholder */}
-        <div className="col-span-7 bg-slate-900 rounded-xl border border-slate-800 p-4 min-h-[400px] flex items-center justify-center">
-          <div className="text-slate-600 text-center">
-            <div className="text-4xl mb-2">📈</div>
-            <div className="text-sm">TradingChart — lightweight-charts</div>
-            <div className="text-xs text-slate-700 mt-1">
-              Mount &lt;TradingChart symbol="{selectedSymbol}" /&gt; here
+        {/* TradingChart — OHLCV + signal markers */}
+        <div className="col-span-7 bg-slate-900 rounded-xl border border-slate-800 p-4 min-h-[400px] flex flex-col">
+          {/* Chart toolbar */}
+          <div className="flex items-center gap-2 mb-2">
+            <div className="flex gap-1">
+              {INTERVALS.map((iv) => (
+                <button
+                  key={iv}
+                  onClick={() => setChartInterval(iv)}
+                  className={`px-2 py-0.5 rounded text-xs font-mono transition-colors ${
+                    chartInterval === iv
+                      ? "bg-blue-600 text-white"
+                      : "bg-slate-800 text-slate-400 hover:text-white"
+                  }`}
+                >
+                  {iv}
+                </button>
+              ))}
             </div>
+            {chartLoading && (
+              <span className="text-xs font-mono text-slate-600 animate-pulse">loading…</span>
+            )}
+            {chartError && !chartLoading && (
+              <span className="text-xs font-mono text-red-500" title={chartError}>
+                ⚠ openbb-adapter unreachable
+              </span>
+            )}
+            <span className="ml-auto text-xs font-mono text-slate-600">
+              {ohlcvBars.length} bars
+            </span>
+          </div>
+          {/* Chart */}
+          <div className="flex-1">
+            {ohlcvBars.length > 0 ? (
+              <TradingChart
+                symbol={selectedSymbol}
+                historicalData={ohlcvBars}
+                signals={signals}
+                regime={regime}
+                height={360}
+              />
+            ) : (
+              <div className="h-full flex items-center justify-center text-slate-600 text-sm">
+                {chartLoading ? "Loading chart data…" : "No data available"}
+              </div>
+            )}
           </div>
         </div>
 
@@ -405,6 +461,11 @@ export default function TradingDashboard() {
         {/* Execution Engine — positions + recent orders + kill-switch */}
         <div className="col-span-12">
           <ExecutionPanel onKillSwitchChange={setKillSwitchActive} />
+        </div>
+
+        {/* SEC Research — filings + institutional positions */}
+        <div className="col-span-12">
+          <SECPanel pollMs={60_000} />
         </div>
       </div>
     </div>

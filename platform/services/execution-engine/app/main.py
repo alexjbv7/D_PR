@@ -37,6 +37,7 @@ from .brokers import (
     CCXTAdapter,
     CCXTConfig,
 )
+from .brokers._alpaca.market_data import AlpacaMarketData
 from .reconciler import ReconcileReport, Reconciler
 from .repository import MemoryRepository, PostgresRepository, Repository
 from .risk_gate import RiskConfig, RiskGate
@@ -60,6 +61,7 @@ class AppState:
     risk_gate:    RiskGate
     reconciler:   Reconciler
     service:      ExecutionService
+    market_data:  Optional[AlpacaMarketData]
     pg_pool:      Any                  # asyncpg pool
     kafka_consumer_task: Optional[asyncio.Task]
     kafka_consumer:      Any
@@ -71,6 +73,7 @@ class AppState:
         self.kafka_consumer      = None
         self.kafka_producer      = None
         self.kill_switch_tripped = False
+        self.market_data         = None
 
 
 # ---------------------------------------------------------------------------
@@ -97,14 +100,38 @@ async def _build_repository(settings: Settings) -> tuple[Repository, Any]:
         return MemoryRepository(), None
 
 
-def _build_router(settings: Settings) -> Router:
-    router = Router(default_equity="alpaca", default_crypto=settings.ccxt_exchange)
-    if settings.alpaca_enabled and settings.alpaca_api_key:
-        router.register(AlpacaAdapter(config=AlpacaConfig(
+def _build_market_data(settings: Settings) -> Optional[AlpacaMarketData]:
+    """Build market data client if Alpaca credentials are present."""
+    if not settings.alpaca_enabled or not settings.alpaca_api_key:
+        return None
+    try:
+        md = AlpacaMarketData(
             api_key=settings.alpaca_api_key,
             api_secret=settings.alpaca_api_secret,
-            paper=settings.alpaca_paper,
-        )))
+            feed=settings.alpaca_data_feed,
+        )
+        md.connect()
+        logger.info("alpaca.market_data.ready feed=%s", settings.alpaca_data_feed)
+        return md
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("alpaca.market_data.init_failed: %s", exc)
+        return None
+
+
+def _build_router(
+    settings: Settings,
+    market_data: Optional[AlpacaMarketData] = None,
+) -> Router:
+    router = Router(default_equity="alpaca", default_crypto=settings.ccxt_exchange)
+    if settings.alpaca_enabled and settings.alpaca_api_key:
+        router.register(AlpacaAdapter(
+            config=AlpacaConfig(
+                api_key=settings.alpaca_api_key,
+                api_secret=settings.alpaca_api_secret,
+                paper=settings.alpaca_paper,
+            ),
+            market_data=market_data,
+        ))
     if settings.ccxt_enabled and settings.ccxt_api_key:
         router.register(CCXTAdapter(config=CCXTConfig(
             exchange=settings.ccxt_exchange,
@@ -238,8 +265,9 @@ async def lifespan(app: FastAPI):
     # 1. Repository
     state.repository, state.pg_pool = await _build_repository(settings)
 
-    # 2. Router + adapters
-    state.router = _build_router(settings)
+    # 2. Market data + Router + adapters
+    state.market_data = _build_market_data(settings)
+    state.router = _build_router(settings, market_data=state.market_data)
     await _connect_router(state.router)
 
     # 3. Risk gate
@@ -291,6 +319,8 @@ async def lifespan(app: FastAPI):
         except (asyncio.CancelledError, Exception):                # noqa: BLE001
             pass
     await state.service.stop()
+    if state.market_data is not None:
+        state.market_data.close()
     if state.pg_pool is not None:
         await state.pg_pool.close()
     logger.info("execution-engine.stopped")
@@ -381,3 +411,84 @@ async def kill_switch(action: str):
     else:
         raise HTTPException(400, f"unknown action: {action}")
     return {"kill_switch": state.kill_switch_tripped}
+
+
+# ---------------------------------------------------------------------------
+# Market data endpoints
+# ---------------------------------------------------------------------------
+
+def _require_market_data() -> AlpacaMarketData:
+    state: AppState = app.state.app_state
+    if state.market_data is None:
+        raise HTTPException(
+            503,
+            "Market data not available.  "
+            "Set ALPACA_API_KEY and ALPACA_API_SECRET in .env.",
+        )
+    return state.market_data
+
+
+@app.get("/api/market-data/bars/{symbol:path}")
+async def market_data_bars(
+    symbol: str,
+    timeframe: str = "1h",
+    limit: int = 200,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+):
+    """
+    Historical OHLCV bars.
+
+    Query params
+    ------------
+    * ``symbol``    — Alpaca-format (``AAPL``, ``BTC/USD``).
+    * ``timeframe`` — ``1min|5min|15min|30min|1h|4h|1d|1w|1m``.
+    * ``limit``     — max bars (default 200).
+    * ``start``, ``end`` — ISO-8601 UTC timestamps.
+    """
+    md = _require_market_data()
+    start_dt = (
+        datetime.fromisoformat(start.replace("Z", "+00:00"))
+        if start else None
+    )
+    end_dt = (
+        datetime.fromisoformat(end.replace("Z", "+00:00"))
+        if end else None
+    )
+    try:
+        bars = await md.get_bars(symbol, timeframe, start_dt, end_dt, limit)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Alpaca data error: {exc}")
+    return {"symbol": symbol, "timeframe": timeframe, "count": len(bars), "bars": bars}
+
+
+@app.get("/api/market-data/quote/{symbol:path}")
+async def market_data_quote(symbol: str):
+    """Latest bid/ask quote for *symbol*."""
+    md = _require_market_data()
+    quote = await md.get_latest_quote(symbol)
+    if quote is None:
+        raise HTTPException(404, f"No quote available for {symbol}")
+    return quote
+
+
+@app.get("/api/market-data/snapshot/{symbol:path}")
+async def market_data_snapshot(symbol: str):
+    """Full snapshot: latest trade + quote + minute bar + daily bar."""
+    md = _require_market_data()
+    snap = await md.get_snapshot(symbol)
+    if snap is None:
+        raise HTTPException(404, f"No snapshot available for {symbol}")
+    return snap
+
+
+@app.get("/api/market-data/price/{symbol:path}")
+async def market_data_price(symbol: str):
+    """Single last-traded price as Decimal string (for risk gate / UI)."""
+    md = _require_market_data()
+    price = await md.get_last_price(symbol)
+    if price is None:
+        raise HTTPException(404, f"No price available for {symbol}")
+    return {"symbol": symbol, "price": str(price)}

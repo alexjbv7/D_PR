@@ -197,6 +197,57 @@ export type WSEventType =
   | "ExecutionResult";
 
 // ============================================================================
+// SEC Research — REST shapes
+// Mirrors platform/services/sec-research/app/main.py endpoints.
+// ============================================================================
+
+export type FilingSentimentLabel = "positive" | "negative" | "neutral" | "mixed";
+
+export interface FilingSignal {
+  event_id:         string;
+  event_type:       string;   // "SECFilingSignal"
+  ts:               string;
+  ticker:           string;
+  form_type:        string;   // "8-K" | "10-K" | "10-Q" | "13F"
+  sentiment:        FilingSentimentLabel;
+  score:            number;   // -1 to +1
+  confidence:       number;   // 0 to 1
+  signals:          string[];
+  is_market_moving: boolean;
+  summary:          string;
+  regulators:       string[];
+  crypto_assets:    string[];
+  amounts_usd:      number[];
+}
+
+export interface InstitutionalPosition {
+  institution: string;
+  ticker:      string;   // IBIT, FBTC, COIN, etc.
+  shares:      number;
+  value_usd:   number;
+  period:      string;   // "2025-Q1"
+  change_pct:  number;
+}
+
+export interface SECHealth {
+  status:  string;
+  service: string;
+  ts:      string;
+}
+
+export interface RegulatorySignalsResponse {
+  signals:                   FilingSignal[];
+  count:                     number;
+  has_active_regulatory_risk: boolean;
+}
+
+export interface InstitutionalPositionsResponse {
+  positions: InstitutionalPosition[];
+  count:     number;
+  ts:        string;
+}
+
+// ============================================================================
 // Execution Engine — REST shapes
 // Mirrors platform/services/execution-engine/app/main.py endpoints.
 // All numeric monetary values come over the wire as strings (Decimal → str)

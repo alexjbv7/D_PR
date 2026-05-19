@@ -364,6 +364,15 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      # Vite bakes VITE_* vars into the JS bundle at build time — they must be
+      # passed as build args, not just runtime environment variables.
+      args:
+        VITE_WS_URL:           ws://localhost:8005/ws
+        VITE_API_URL:          http://localhost:8005
+        VITE_ORCHESTRATOR_URL: http://localhost:8007
+        VITE_SEC_URL:          http://localhost:8008
+        VITE_EXECUTION_URL:    http://localhost:8010
+        VITE_OPENBB_URL:       http://localhost:8009
     ports:
       - "3000:3000"
     environment:
@@ -372,6 +381,7 @@ services:
       VITE_ORCHESTRATOR_URL:    http://localhost:8007
       VITE_SEC_URL:             http://localhost:8008
       VITE_EXECUTION_URL:       http://localhost:8010
+      VITE_OPENBB_URL:          http://localhost:8009
     depends_on:
       - realtime-signal
     networks: [los-ojos-net]

@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     alpaca_api_key:    Optional[str] = None
     alpaca_api_secret: Optional[str] = None
     alpaca_paper:      bool          = True
+    alpaca_data_feed:  str           = "iex"    # "iex" (free) or "sip" (paid)
 
     # ---- ccxt ----
     ccxt_enabled:      bool          = False
