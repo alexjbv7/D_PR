@@ -26,7 +26,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -64,12 +64,13 @@ class OrderSide(str, Enum):
 
 
 class OrderType(str, Enum):
-    MARKET      = "market"
-    LIMIT       = "limit"
-    LIMIT_MAKER = "limit_maker"   # post-only
-    STOP_LIMIT  = "stop_limit"
-    TWAP        = "twap"
-    VWAP        = "vwap"
+    MARKET         = "market"
+    LIMIT          = "limit"
+    LIMIT_MAKER    = "limit_maker"   # post-only
+    STOP_LIMIT     = "stop_limit"
+    TRAILING_STOP  = "trailing_stop"
+    TWAP           = "twap"
+    VWAP           = "vwap"
 
 
 class OrderStatus(str, Enum):
@@ -146,24 +147,53 @@ class OrderIntent(BaseModel):
     side:        OrderSide
     qty:         Decimal      = Field(gt=Decimal("0"))
     order_type:  OrderType    = OrderType.LIMIT_MAKER
-    limit_price: Optional[Decimal] = None
-    sl_price:    Optional[Decimal] = None
-    tp_price:    Optional[Decimal] = None
-    tif:         TimeInForce  = TimeInForce.GTC
-    venue:       str          = ""
-    ts:          datetime     = Field(default_factory=_utcnow)
+    limit_price:    Optional[Decimal] = None
+    sl_price:       Optional[Decimal] = None
+    tp_price:       Optional[Decimal] = None
+    trail_percent:  Optional[Decimal] = None   # e.g. Decimal("1.5") = 1.5%
+    trail_price:    Optional[Decimal] = None   # absolute trail offset
+    extended_hours: bool              = False
+    tif:            TimeInForce       = TimeInForce.GTC
+    venue:          str               = ""
+    ts:             datetime          = Field(default_factory=_utcnow)
 
     # Risk metadata carried for audit trail
     kelly_fraction:  float = 0.0
     target_risk_pct: float = 0.0
     p_win:           float = 0.0
 
-    @field_validator("qty", "limit_price", "sl_price", "tp_price", mode="before")
+    @field_validator(
+        "qty", "limit_price", "sl_price", "tp_price",
+        "trail_percent", "trail_price",
+        mode="before",
+    )
     @classmethod
     def _coerce_decimal(cls, v: object) -> Optional[Decimal]:
         if v is None:
             return None
         return Decimal(str(v))
+
+    @model_validator(mode="after")
+    def _validate_trailing_and_bracket(self) -> "OrderIntent":
+        if self.order_type == OrderType.TRAILING_STOP:
+            has_pct = self.trail_percent is not None
+            has_px  = self.trail_price is not None
+            if has_pct == has_px:
+                raise ValueError(
+                    "TRAILING_STOP requires exactly one of trail_percent or trail_price"
+                )
+            if has_pct and self.trail_percent is not None and self.trail_percent <= 0:
+                raise ValueError("trail_percent must be > 0")
+            if has_px and self.trail_price is not None and self.trail_price <= 0:
+                raise ValueError("trail_price must be > 0")
+
+        if self.sl_price is not None and self.tp_price is not None:
+            if self.order_type == OrderType.LIMIT_MAKER:
+                raise ValueError(
+                    "Bracket orders require LIMIT (not post-only) or MARKET; "
+                    "LIMIT_MAKER is incompatible with sl_price+tp_price"
+                )
+        return self
 
 
 class Fill(BaseModel):

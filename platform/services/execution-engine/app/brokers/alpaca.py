@@ -16,9 +16,9 @@ Design
 * ``alpaca-py`` is an optional dependency.  Importing this module never fails;
   instantiating :class:`AlpacaAdapter` raises :class:`BrokerError` when the
   SDK is missing.
-* For SL/TP, the current implementation places the primary order only and
-  carries SL/TP as metadata.  Bracket orders will be added in PASO E once the
-  risk-gate's order-lifecycle state machine is in place.
+* Bracket / OTO / trailing-stop requests are built in
+  :mod:`_alpaca.bracket_builder` and submitted atomically via Alpaca
+  ``order_class`` (server-side cross-leg cancellation).
 
 References
 ----------
@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time as _time
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
@@ -48,38 +49,101 @@ from quant_shared.schemas.orders import (
 
 from .base import AccountInfo, BrokerAdapter, BrokerError
 from . import _symbol_mapping as sym_map
+from ._alpaca import bracket_builder
+from ._alpaca.rate_limiter import AlpacaRateLimiter
+from ._alpaca.retry import retry_with_jitter
+from ._alpaca.market_data import AlpacaMarketData
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Prometheus metrics (optional — graceful no-op if prometheus_client absent)
+# ---------------------------------------------------------------------------
+
+_HAS_PROMETHEUS = False
+SUBMIT_ATTEMPTS: Any = None
+RATE_LIMITED: Any = None
+SUBMIT_LATENCY: Any = None
+
+try:
+    from prometheus_client import Counter, Histogram
+
+    SUBMIT_ATTEMPTS = Counter(
+        "alpaca_submit_attempts_total",
+        "Alpaca submit attempts by result category",
+        ["result"],  # success | 429 | 5xx | 4xx
+    )
+    RATE_LIMITED = Counter(
+        "alpaca_429_total",
+        "Number of 429 Too Many Requests responses from Alpaca",
+    )
+    SUBMIT_LATENCY = Histogram(
+        "alpaca_submit_latency_seconds",
+        "Latency of Alpaca submit_order calls (seconds)",
+        buckets=(0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0),
+    )
+    _HAS_PROMETHEUS = True
+except ImportError:  # pragma: no cover
+    pass
+
+
+def _record_submit(result_label: str) -> None:
+    """Bump the appropriate Prometheus counter."""
+    if _HAS_PROMETHEUS:
+        SUBMIT_ATTEMPTS.labels(result=result_label).inc()
+        if result_label == "429":
+            RATE_LIMITED.inc()
 
 
 # ---------------------------------------------------------------------------
 # Optional SDK import
 # ---------------------------------------------------------------------------
 
+_HAS_ALPACA = False
+TradingClient: Any = None
+_AC_Side: Any = None
+_AC_Status: Any = None
+_AC_TIF: Any = None
+_AC_OrderClass: Any = None
+_AC_Market: Any = None
+_AC_Limit: Any = None
+_AC_StopLimit: Any = None
+_AC_StopLoss: Any = None
+_AC_TakeProfit: Any = None
+_AC_TrailingStop: Any = None
+
 try:
-    from alpaca.trading.client import TradingClient                       # type: ignore
-    from alpaca.trading.enums import (                                    # type: ignore
-        OrderClass as _AC_OrderClass,
-        OrderSide as _AC_Side,
-        OrderStatus as _AC_Status,
-        TimeInForce as _AC_TIF,
+    from alpaca.trading.client import TradingClient as _TradingClient
+    from alpaca.trading.enums import (
+        OrderClass as _ImportedOrderClass,
+        OrderSide as _ImportedSide,
+        OrderStatus as _ImportedStatus,
+        TimeInForce as _ImportedTIF,
     )
-    from alpaca.trading.requests import (                                 # type: ignore
-        LimitOrderRequest as _AC_Limit,
-        MarketOrderRequest as _AC_Market,
-        StopLimitOrderRequest as _AC_StopLimit,
+    from alpaca.trading.requests import (
+        LimitOrderRequest as _ImportedLimit,
+        MarketOrderRequest as _ImportedMarket,
+        StopLimitOrderRequest as _ImportedStopLimit,
+        StopLossRequest as _ImportedStopLoss,
+        TakeProfitRequest as _ImportedTakeProfit,
+        TrailingStopOrderRequest as _ImportedTrailingStop,
     )
+
+    TradingClient = _TradingClient
+    _AC_Side = _ImportedSide
+    _AC_Status = _ImportedStatus
+    _AC_TIF = _ImportedTIF
+    _AC_OrderClass = _ImportedOrderClass
+    _AC_Market = _ImportedMarket
+    _AC_Limit = _ImportedLimit
+    _AC_StopLimit = _ImportedStopLimit
+    _AC_StopLoss = _ImportedStopLoss
+    _AC_TakeProfit = _ImportedTakeProfit
+    _AC_TrailingStop = _ImportedTrailingStop
     _HAS_ALPACA = True
 except ImportError:  # pragma: no cover  (covered in tests via patching)
-    _HAS_ALPACA = False
-    TradingClient   = None       # type: ignore[assignment]
-    _AC_Side        = None       # type: ignore[assignment]
-    _AC_Status      = None       # type: ignore[assignment]
-    _AC_TIF         = None       # type: ignore[assignment]
-    _AC_OrderClass  = None       # type: ignore[assignment]
-    _AC_Market      = None       # type: ignore[assignment]
-    _AC_Limit       = None       # type: ignore[assignment]
-    _AC_StopLimit   = None       # type: ignore[assignment]
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -196,10 +260,14 @@ class AlpacaAdapter(BrokerAdapter):
         self,
         config: Optional[AlpacaConfig] = None,
         client_factory: Optional[Any] = None,
+        rate_limiter: Optional[AlpacaRateLimiter] = None,
+        market_data: Optional[AlpacaMarketData] = None,
     ):
         self.config = config or AlpacaConfig()
         self._client_factory = client_factory
         self._client: Any = None
+        self._rate_limiter = rate_limiter or AlpacaRateLimiter()
+        self._market_data = market_data
 
     # -----------------------------------------------------------------------
     # Lifecycle
@@ -248,22 +316,62 @@ class AlpacaAdapter(BrokerAdapter):
             raise BrokerError("AlpacaAdapter.connect() must be called first.")
         return self._client
 
+    def _ac_classes(self) -> dict[str, Any]:
+        """Bundle of alpaca-py request classes for bracket_builder."""
+        return {
+            "LimitOrderRequest":        _AC_Limit,
+            "MarketOrderRequest":       _AC_Market,
+            "StopLimitOrderRequest":    _AC_StopLimit,
+            "TrailingStopOrderRequest": _AC_TrailingStop,
+            "TakeProfitRequest":        _AC_TakeProfit,
+            "StopLossRequest":          _AC_StopLoss,
+            "OrderClass":               _AC_OrderClass,
+        }
+
     def _build_request(self, intent: OrderIntent) -> Any:
-        """Translate :class:`OrderIntent` → Alpaca request object."""
-        alpaca_sym  = sym_map.to_alpaca(intent.symbol)
-        side        = _SIDE_TO_ALPACA[intent.side]
-        # Crypto only supports GTC / IOC on Alpaca; fall back to GTC if needed.
-        is_crypto   = sym_map.is_crypto(intent.symbol)
-        tif_choice  = intent.tif
+        """Translate :class:`OrderIntent` → Alpaca request object.
+
+        Decision tree: trailing → bracket → OTO → simple (market/limit/stop).
+        Every request includes ``client_order_id = intent.intent_id``.
+        """
+        alpaca_sym = sym_map.to_alpaca(intent.symbol)
+        side       = _SIDE_TO_ALPACA[intent.side]
+        is_crypto  = sym_map.is_crypto(intent.symbol)
+        tif_choice = intent.tif
         if is_crypto and tif_choice not in (TimeInForce.GTC, TimeInForce.IOC):
             tif_choice = TimeInForce.GTC
         tif = _TIF_TO_ALPACA[tif_choice]
+        ac  = self._ac_classes()
 
-        qty = float(intent.qty)             # alpaca-py accepts float or str
+        if bracket_builder.should_use_trailing(intent):
+            return bracket_builder.build_trailing_request(
+                intent, alpaca_sym, side, tif, ac,
+            )
+        if bracket_builder.should_use_bracket(intent):
+            return bracket_builder.build_bracket_request(
+                intent, alpaca_sym, side, tif, ac,
+            )
+        if bracket_builder.should_use_oco(intent):
+            return bracket_builder.build_oco_request(
+                intent, alpaca_sym, side, tif, ac,
+            )
+        return self._build_simple_request(intent, alpaca_sym, side, tif)
+
+    def _build_simple_request(
+        self,
+        intent: OrderIntent,
+        alpaca_sym: str,
+        side: Any,
+        tif: Any,
+    ) -> Any:
+        """MARKET / LIMIT / LIMIT_MAKER / STOP_LIMIT — pre-S5 behaviour."""
+        qty  = float(intent.qty)
+        coid = intent.intent_id
 
         if intent.order_type == OrderType.MARKET:
             return _AC_Market(
                 symbol=alpaca_sym, qty=qty, side=side, time_in_force=tif,
+                client_order_id=coid,
             )
         if intent.order_type in (OrderType.LIMIT, OrderType.LIMIT_MAKER):
             if intent.limit_price is None:
@@ -276,6 +384,7 @@ class AlpacaAdapter(BrokerAdapter):
                 side=side,
                 time_in_force=tif,
                 limit_price=float(intent.limit_price),
+                client_order_id=coid,
             )
         if intent.order_type == OrderType.STOP_LIMIT:
             if intent.limit_price is None or intent.sl_price is None:
@@ -289,6 +398,7 @@ class AlpacaAdapter(BrokerAdapter):
                 time_in_force=tif,
                 limit_price=float(intent.limit_price),
                 stop_price=float(intent.sl_price),
+                client_order_id=coid,
             )
         raise BrokerError(f"Unsupported order_type for Alpaca: {intent.order_type}")
 
@@ -346,16 +456,28 @@ class AlpacaAdapter(BrokerAdapter):
     async def submit(self, intent: OrderIntent) -> OrderResult:
         client = self._require_client()
         request = self._build_request(intent)
+        await self._rate_limiter.acquire("trading")
+        t0 = _time.monotonic()
         try:
-            raw = await asyncio.to_thread(client.submit_order, order_data=request)
+            raw = await self._submit_with_retry(client, request)
+            _record_submit("success")
+            return self._alpaca_order_to_result(raw, intent_id=intent.intent_id)
         except Exception as exc:                                     # noqa: BLE001
+            self._classify_and_record(exc)
             raise BrokerError(f"Alpaca submit failed: {exc}") from exc
-        return self._alpaca_order_to_result(raw, intent_id=intent.intent_id)
+        finally:
+            if _HAS_PROMETHEUS:
+                SUBMIT_LATENCY.observe(_time.monotonic() - t0)
+
+    @retry_with_jitter(max_attempts=3, base_delay=0.5)
+    async def _submit_with_retry(self, client: Any, request: Any) -> Any:
+        return await asyncio.to_thread(client.submit_order, order_data=request)
 
     async def cancel(self, broker_id: str) -> bool:
         client = self._require_client()
+        await self._rate_limiter.acquire("trading")
         try:
-            await asyncio.to_thread(client.cancel_order_by_id, broker_id)
+            await self._cancel_with_retry(client, broker_id)
             return True
         except Exception as exc:                                     # noqa: BLE001
             msg = str(exc).lower()
@@ -363,28 +485,49 @@ class AlpacaAdapter(BrokerAdapter):
                 return False
             raise BrokerError(f"Alpaca cancel failed: {exc}") from exc
 
+    @retry_with_jitter(max_attempts=3, base_delay=0.5)
+    async def _cancel_with_retry(self, client: Any, broker_id: str) -> None:
+        await asyncio.to_thread(client.cancel_order_by_id, broker_id)
+
     async def get_order(self, broker_id: str) -> OrderResult:
         client = self._require_client()
+        await self._rate_limiter.acquire("trading")
         try:
-            raw = await asyncio.to_thread(client.get_order_by_id, broker_id)
+            raw = await self._get_order_with_retry(client, broker_id)
         except Exception as exc:                                     # noqa: BLE001
             raise BrokerError(f"Alpaca get_order failed: {exc}") from exc
         return self._alpaca_order_to_result(raw)
 
+    @retry_with_jitter(max_attempts=3, base_delay=0.5)
+    async def _get_order_with_retry(self, client: Any, broker_id: str) -> Any:
+        return await asyncio.to_thread(client.get_order_by_id, broker_id)
+
     async def get_positions(self) -> list[Position]:
         client = self._require_client()
+        await self._rate_limiter.acquire("trading")
         try:
-            raws = await asyncio.to_thread(client.get_all_positions)
+            raws = await self._get_positions_with_retry(client)
         except Exception as exc:                                     # noqa: BLE001
             raise BrokerError(f"Alpaca get_positions failed: {exc}") from exc
         return [self._alpaca_position_to_internal(r) for r in raws]
 
+    @retry_with_jitter(max_attempts=3, base_delay=0.5)
+    async def _get_positions_with_retry(self, client: Any) -> Any:
+        return await asyncio.to_thread(client.get_all_positions)
+
     async def get_account(self) -> AccountInfo:
         client = self._require_client()
+        await self._rate_limiter.acquire("trading")
         try:
-            acc = await asyncio.to_thread(client.get_account)
+            acc = await self._get_account_with_retry(client)
         except Exception as exc:                                     # noqa: BLE001
             raise BrokerError(f"Alpaca get_account failed: {exc}") from exc
+
+        last_eq = getattr(acc, "last_equity", None)
+        if last_eq is not None:
+            pnl_day = Decimal(str(acc.equity)) - Decimal(str(last_eq))
+        else:
+            pnl_day = Decimal("0")
 
         return AccountInfo(
             account_id  = str(getattr(acc, "id", "")),
@@ -393,12 +536,63 @@ class AlpacaAdapter(BrokerAdapter):
             cash        = Decimal(str(acc.cash)),
             margin_used = _opt_decimal(getattr(acc, "initial_margin", None))
                           or Decimal("0"),
-            pnl_day     = _opt_decimal(
-                Decimal(str(acc.equity)) - Decimal(str(acc.last_equity))
-            ) if getattr(acc, "last_equity", None) is not None else Decimal("0"),
+            pnl_day     = pnl_day,
             currency    = getattr(acc, "currency", "USD"),
             is_paper    = self.config.paper,
         )
+
+    @retry_with_jitter(max_attempts=3, base_delay=0.5)
+    async def _get_account_with_retry(self, client: Any) -> Any:
+        return await asyncio.to_thread(client.get_account)
+
+    # -----------------------------------------------------------------------
+    # Market data — price awareness
+    # -----------------------------------------------------------------------
+
+    async def get_last_price(self, symbol: str) -> Optional[Decimal]:
+        """
+        Best-effort current price using Alpaca market data.
+
+        Falls back to ``None`` if no market data client is configured
+        (preserves the BrokerAdapter default).
+        """
+        if self._market_data is None:
+            return None
+        alpaca_sym = sym_map.to_alpaca(symbol)
+        price = await self._market_data.get_last_price(alpaca_sym)
+        if price is None:
+            return None
+        return Decimal(str(price))
+
+    @property
+    def market_data(self) -> Optional[AlpacaMarketData]:
+        """Expose the market data client for direct use by REST endpoints."""
+        return self._market_data
+
+    # -----------------------------------------------------------------------
+    # Prometheus helpers
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _classify_and_record(exc: BaseException) -> None:
+        """Classify an exception as 429 / 5xx / 4xx and bump the counter."""
+        import re
+        msg = str(exc)
+        match = re.search(r"\b(4\d{2}|5\d{2})\b", msg)
+        if match:
+            code = int(match.group(1))
+            if code == 429:
+                _record_submit("429")
+            elif code >= 500:
+                _record_submit("5xx")
+            else:
+                _record_submit("4xx")
+        else:
+            _record_submit("5xx")   # default: treat unknown as server error
+
+    # -----------------------------------------------------------------------
+    # Reconciliation
+    # -----------------------------------------------------------------------
 
     async def reconcile(self, internal_positions: list[Position]) -> list[str]:
         broker_positions = await self.get_positions()

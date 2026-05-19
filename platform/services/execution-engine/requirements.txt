@@ -10,6 +10,8 @@ redis[hiredis]>=5.0.6
 asyncpg>=0.29.0
 structlog>=24.2.0
 tenacity>=8.3.0
+aiolimiter>=1.1.0
+prometheus-client>=0.20.0
 python-dotenv>=1.0.1
 # brokers
 alpaca-py>=0.20.0
