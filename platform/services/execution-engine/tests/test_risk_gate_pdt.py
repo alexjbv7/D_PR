@@ -119,6 +119,27 @@ async def test_extended_hours_limit_passes(repo, paper_account) -> None:
     assert decision.approved is True
 
 
+async def test_extended_hours_limit_passes_pre_market(repo, paper_account) -> None:
+    gate = RiskGate(_cfg(), repo)
+    ts = datetime(2026, 5, 19, 12, 0, tzinfo=UTC)  # 08:00 ET
+    decision = await gate.evaluate(
+        _intent(order_type=OrderType.LIMIT, extended_hours=True, ts=ts),
+        paper_account,
+    )
+    assert decision.approved is True
+
+
+async def test_extended_hours_limit_blocks_overnight(repo, paper_account) -> None:
+    gate = RiskGate(_cfg(), repo)
+    ts = datetime(2026, 5, 20, 2, 30, tzinfo=UTC)  # 22:30 ET previous day
+    decision = await gate.evaluate(
+        _intent(order_type=OrderType.LIMIT, extended_hours=True, ts=ts),
+        paper_account,
+    )
+    assert decision.approved is False
+    assert decision.breach == "market_closed"
+
+
 async def test_market_closed_before_pdt(repo, paper_account) -> None:
     """Weekend equity intent → market_closed, not pdt_rule."""
     await _seed_day_trades(repo, paper_account.account_id, 3)

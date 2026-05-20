@@ -16,8 +16,9 @@ Checks (evaluated in order; first breach short-circuits)
 2. **daily_dd**         — pnl_day ≤ -daily_dd_kill_pct × equity  →  reject
 3. **per_symbol_cap**   — new notional in symbol > per_symbol_cap_pct × equity
 4. **per_venue_cap**    — new notional in venue  > per_venue_cap_pct × equity
-5. **market_open**      — US equities outside RTH  →  reject (``market_closed``)
-6. **cash_buffer**      — would leave cash < min_cash_buffer_pct × equity
+5. **extended_hours**   — Alpaca ETH requires LIMIT and a valid pre/post window
+6. **market_open**      — US equities outside RTH/ETH → reject (``market_closed``)
+7. **cash_buffer**      — would leave cash < min_cash_buffer_pct × equity
 
 References
 ----------
@@ -28,10 +29,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import time
 from decimal import Decimal
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from quant_shared.calendar import market_calendar
+from quant_shared.calendar.session_phase import SessionPhase
 from quant_shared.schemas.orders import OrderIntent, OrderSide, OrderType, Position
 
 from ._pdt.pdt_tracker import PDTTracker
@@ -39,6 +43,10 @@ from .brokers.base import AccountInfo
 from .repository import Repository, RiskDecision
 
 logger = logging.getLogger(__name__)
+
+_ET = ZoneInfo("America/New_York")
+_ALPACA_EXTENDED_OPEN_ET = time(4, 0)
+_ALPACA_EXTENDED_CLOSE_ET = time(20, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -209,18 +217,30 @@ class RiskGate:
                 ),
             )
 
-        # ---- 5. market open (US equities RTH; crypto 24/7) ----
-        if not market_calendar.is_open(intent.symbol, intent.ts):
+        # ---- 5. extended hours requires LIMIT (Alpaca ETH) ----
+        if intent.extended_hours and intent.order_type != OrderType.LIMIT:
+            return RiskDecision(
+                approved=False,
+                breach="extended_hours_requires_limit",
+                reason=(
+                    f"extended_hours=True requires order_type=LIMIT, "
+                    f"got {intent.order_type.value}"
+                ),
+            )
+
+        # ---- 6. market access (US equities RTH or Alpaca ETH; crypto 24/7) ----
+        if not _market_access_allowed(intent):
             return RiskDecision(
                 approved=False,
                 breach="market_closed",
                 reason=(
-                    f"Market closed for {intent.symbol} at "
+                    f"Market closed or outside supported extended-hours window "
+                    f"for {intent.symbol} at "
                     f"{intent.ts.isoformat()}"
                 ),
             )
 
-        # ---- 6. PDT rule (equities, equity < $26k buffer) ----
+        # ---- 7. PDT rule (equities, equity < $26k buffer) ----
         pdt = await self.pdt_tracker.check(
             account_id=account.account_id,
             symbol=intent.symbol,
@@ -232,17 +252,6 @@ class RiskGate:
                 approved=False,
                 breach="pdt_rule",
                 reason=pdt.reason,
-            )
-
-        # ---- 7. extended hours requires LIMIT (Alpaca ETH) ----
-        if intent.extended_hours and intent.order_type != OrderType.LIMIT:
-            return RiskDecision(
-                approved=False,
-                breach="extended_hours_requires_limit",
-                reason=(
-                    f"extended_hours=True requires order_type=LIMIT, "
-                    f"got {intent.order_type.value}"
-                ),
             )
 
         # ---- 8. cash buffer ----
@@ -287,3 +296,18 @@ def _notional_for_venue(positions: list[Position], venue: str) -> Decimal:
         (p.notional for p in positions if p.venue == venue),
         Decimal("0"),
     )
+
+
+def _market_access_allowed(intent: OrderIntent) -> bool:
+    """True for crypto, equity RTH, or Alpaca's supported extended window."""
+    if market_calendar.is_open(intent.symbol, intent.ts):
+        return True
+    if not intent.extended_hours:
+        return False
+
+    phase = market_calendar.session_phase(intent.symbol, intent.ts)
+    if phase not in (SessionPhase.PRE_MARKET, SessionPhase.POST_MARKET):
+        return False
+
+    local_time = intent.ts.astimezone(_ET).time()
+    return _ALPACA_EXTENDED_OPEN_ET <= local_time < _ALPACA_EXTENDED_CLOSE_ET

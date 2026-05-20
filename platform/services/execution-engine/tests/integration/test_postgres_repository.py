@@ -115,6 +115,27 @@ async def test_save_and_get_intent_roundtrip(repo, unique_tag, cleanup):
     assert loaded.strategy    == unique_tag
 
 
+async def test_save_and_get_notional_intent_roundtrip(repo, unique_tag, cleanup):
+    intent = OrderIntent(
+        signal_id=str(uuid.uuid4()),
+        strategy=unique_tag,
+        symbol="AAPL",
+        side=OrderSide.BUY,
+        notional=Decimal("50"),
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        venue="alpaca",
+        extended_hours=False,
+    )
+    await repo.save_intent(intent, RiskDecision(approved=True, reason="ok"))
+
+    loaded = await repo.get_intent(intent.intent_id)
+    assert loaded is not None
+    assert loaded.qty is None
+    assert loaded.notional == Decimal("50.000000000000")
+    assert loaded.extended_hours is False
+
+
 async def test_save_result_upserts(repo, unique_tag, cleanup):
     intent = OrderIntent(
         strategy=unique_tag, symbol="BTCUSDT", side=OrderSide.BUY,

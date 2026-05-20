@@ -66,6 +66,24 @@ async def test_save_and_get_intent(repo):
     assert loaded.intent_id == intent.intent_id
 
 
+async def test_save_and_get_notional_intent(repo):
+    intent = OrderIntent(
+        symbol="AAPL",
+        side=OrderSide.BUY,
+        notional=Decimal("50"),
+        order_type=OrderType.MARKET,
+        extended_hours=False,
+        venue="alpaca",
+    )
+
+    await repo.save_intent(intent, RiskDecision(approved=True, reason="ok"))
+    loaded = await repo.get_intent(intent.intent_id)
+
+    assert loaded is not None
+    assert loaded.qty is None
+    assert loaded.notional == Decimal("50")
+
+
 async def test_intent_decision_persisted(repo):
     intent   = _make_intent()
     decision = RiskDecision(approved=False, reason="cap", breach="per_symbol_cap")

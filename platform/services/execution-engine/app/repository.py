@@ -333,16 +333,18 @@ class PostgresRepository(Repository):
     async def save_intent(self, intent: OrderIntent, decision: RiskDecision) -> None:
         sql = """
             INSERT INTO orders.intents (
-                intent_id, signal_id, strategy, symbol, side, qty, order_type,
-                limit_price, sl_price, tp_price, tif, venue,
+                intent_id, signal_id, strategy, symbol, side, qty, notional,
+                order_type, limit_price, sl_price, tp_price, extended_hours,
+                tif, venue,
                 kelly_fraction, target_risk_pct, p_win,
                 risk_decision, risk_reason, risk_breach, ts
             )
             VALUES (
                 $1::uuid, NULLIF($2,'')::uuid, $3, $4, $5, $6, $7,
                 $8, $9, $10, $11, $12,
-                $13, $14, $15,
-                $16, $17, $18, $19
+                $13, $14,
+                $15, $16, $17,
+                $18, $19, $20, $21
             )
             ON CONFLICT (intent_id) DO UPDATE SET
                 risk_decision = EXCLUDED.risk_decision,
@@ -353,9 +355,9 @@ class PostgresRepository(Repository):
             await conn.execute(
                 sql,
                 intent.intent_id, intent.signal_id, intent.strategy,
-                intent.symbol, intent.side.value, intent.qty,
+                intent.symbol, intent.side.value, intent.qty, intent.notional,
                 intent.order_type.value, intent.limit_price, intent.sl_price,
-                intent.tp_price, intent.tif.value, intent.venue,
+                intent.tp_price, intent.extended_hours, intent.tif.value, intent.venue,
                 Decimal(str(intent.kelly_fraction)),
                 Decimal(str(intent.target_risk_pct)),
                 Decimal(str(intent.p_win)),
@@ -579,10 +581,12 @@ def _row_to_intent(row: Any) -> OrderIntent:
         symbol=row["symbol"],
         side=OrderSide(row["side"]),
         qty=row["qty"],
+        notional=row["notional"],
         order_type=OrderType(row["order_type"]),
         limit_price=row["limit_price"],
         sl_price=row["sl_price"],
         tp_price=row["tp_price"],
+        extended_hours=bool(row["extended_hours"]),
         tif=TimeInForce(row["tif"]),
         venue=row["venue"] or "",
         kelly_fraction=float(row["kelly_fraction"] or 0),
