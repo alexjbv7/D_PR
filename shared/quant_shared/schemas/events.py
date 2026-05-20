@@ -410,6 +410,116 @@ class UniverseUpdateEvent(BaseEvent):
     emitted_ts: datetime = Field(default_factory=_utcnow)
 
 
+# ===========================================================================
+# DRIFT & RETRAINING  (Semana 8)
+# ===========================================================================
+
+class DriftDetectedEvent(BaseEvent):
+    """Feature distribution drift detected via PSI.
+
+    Emitted by the drift cron (platform/services/ml-feature-store) when
+    PSI exceeds the moderate threshold (0.10) for any feature.
+    Severity "severe" (PSI ≥ 0.25) triggers a P1 alert and a
+    RetrainTriggerEvent (unless suppressed by MacroEventFilter).
+    """
+    source: str = "ml-feature-store"
+    horizon: str                          # "intraday" | "swing" | "daily"
+    model_version: str
+    feature_name: str
+    psi: float
+    severity: str                         # "stable" | "moderate" | "severe"
+    train_window_days: int
+    recent_window_days: int = 7
+    n_buckets: int = 10
+
+
+class ECEDriftEvent(BaseEvent):
+    """Expected Calibration Error exceeded the 0.05 threshold.
+
+    Emitted when the rolling 7-day ECE for a given horizon exceeds
+    the well-calibrated threshold.  Triggers a P2 alert and
+    (combined with PSI) may trigger a RetrainTriggerEvent.
+    """
+    source: str = "ml-feature-store"
+    horizon: str
+    model_version: str
+    ece: float
+    brier: float
+    threshold: float = 0.05
+    window_days: int = 7
+    n_samples: int
+
+
+class RetrainTriggerEvent(BaseEvent):
+    """Trigger retraining of a model horizon.
+
+    Published to the compact topic ``los_ojos.retrain.triggers`` with
+    key = horizon.  Compact semantics ensure at-most-one pending trigger
+    per horizon.
+
+    Suppressed by MacroEventFilter within ±2 days of FOMC/NFP/CPI
+    (see ADR-031).  In that case ``suppressed=True`` and the event is
+    still emitted (for audit) but the training cron skips it.
+    """
+    source: str = "ml-feature-store"
+    horizon: str
+    trigger_reason: str                   # "psi_severe" | "ece_exceeded" | "both"
+    psi_max: float
+    ece: float
+    suppressed: bool = False
+    suppression_reason: Optional[str] = None
+
+
+# ===========================================================================
+# ALLOCATOR  (Semana 9)
+# ===========================================================================
+
+class AllocatorState(BaseModel):
+    """Snapshot of the Beta(α, β) posterior for a single horizon.
+
+    Published as part of AllocatorUpdateEvent to give downstream consumers
+    a denormalised view (no need to re-query Postgres).
+    """
+    horizon:        Literal["intraday", "swing", "daily"]
+    alpha:          Decimal
+    beta:           Decimal
+    mean:           Decimal      # α / (α + β)
+    variance:       Decimal      # αβ / ((α+β)² · (α+β+1))
+    last_update_ts: datetime
+
+    model_config = {"json_encoders": {datetime: lambda v: v.isoformat()}}
+
+
+class AllocatorUpdateEvent(BaseEvent):
+    """Emitted by update_consumer after a trade close updates the posterior.
+
+    Idempotent on ``trade_id``: the update_consumer checks
+    risk.allocator_updates before applying.  This event is emitted only on
+    a true state transition (no-ops are skipped silently).
+    """
+    source: str = "strategy-orchestrator"
+    horizon:      Literal["intraday", "swing", "daily"]
+    trade_id:     str                    # OrderResult.result_id — idempotency key
+    outcome:      Literal["win", "loss"]
+    realized_pnl: Decimal
+    alpha_after:  Decimal
+    beta_after:   Decimal
+
+
+class AllocatorDecisionEvent(BaseEvent):
+    """Emitted by ThompsonAllocator on each choose() call.
+
+    Captures the Thompson sample per horizon so audits can reconstruct
+    why a particular horizon was picked (or why nothing was).
+    """
+    source: str = "strategy-orchestrator"
+    symbol:         str
+    direction:      int                          # -1 | 0 | +1
+    chosen_horizon: Optional[str] = None         # None if all rejected upstream
+    samples:        dict[str, Decimal]           # {horizon: sample_float_as_decimal}
+    rejected_by:    Optional[str] = None         # reason when chosen is None
+
+
 class KafkaTopics:
     """Central registry of all Kafka topic names (authoritative).
 
@@ -464,6 +574,14 @@ class KafkaTopics:
     ANOMALY             = "los_ojos.context.anomaly"
     KILL_SWITCH         = "los_ojos.bot.kill_switch"
     CONTEXT_STATE       = "los_ojos.context.state"
+
+    # Drift & retraining (Semana 8)
+    DRIFT_EVENTS        = "los_ojos.drift.events"
+    RETRAIN_TRIGGERS    = "los_ojos.retrain.triggers"  # compact topic, key = horizon
+
+    # Allocator (Semana 9)
+    ALLOCATOR_UPDATES   = "los_ojos.allocator.updates"      # append-only, 1y audit
+    ALLOCATOR_DECISIONS = "los_ojos.allocator.decisions"    # every choose() call
 
     @classmethod
     def all_topics(cls) -> list[str]:

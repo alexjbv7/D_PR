@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import pickle
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -74,7 +75,10 @@ def test_same_seed_same_final_model_hash() -> None:
         sl_pct=Decimal("0.005"),
         timeout_bars=3,
         embargo=INTRADAY.embargo,
-        train_lookback=INTRADAY.train_lookback,
+        # Use a small lookback so the synthetic 300-row dataset produces
+        # multiple WF folds (INTRADAY.train_lookback=365d would request
+        # ~28k bars for a 5min cfg, exceeding the test dataset).
+        train_lookback=timedelta(days=1),
         feature_set="INTRADAY_FEATURES",
         model_name="xgb",
         n_optuna_trials=2,  # minimal for speed
@@ -113,7 +117,10 @@ def test_different_seed_different_model() -> None:
         sl_pct=Decimal("0.005"),
         timeout_bars=3,
         embargo=INTRADAY.embargo,
-        train_lookback=INTRADAY.train_lookback,
+        # Use a small lookback so the synthetic 300-row dataset produces
+        # multiple WF folds (INTRADAY.train_lookback=365d would request
+        # ~28k bars for a 5min cfg, exceeding the test dataset).
+        train_lookback=timedelta(days=1),
         feature_set="INTRADAY_FEATURES",
         model_name="xgb",
         n_optuna_trials=2,

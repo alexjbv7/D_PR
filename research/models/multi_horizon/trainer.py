@@ -234,7 +234,10 @@ class MultiHorizonTrainer:
                 return cfg.name, self._empty_result(cfg.name)
             async with sem:
                 data = horizon_datasets[cfg.name]
-                def _run(c: HorizonConfig = cfg, d: tuple = data) -> TrainResult:
+                def _run(
+                    c: HorizonConfig = cfg,
+                    d: tuple[pd.DataFrame, pd.Series, pd.Series] = data,
+                ) -> TrainResult:
                     return self.run_horizon(c, d[0], d[1], d[2])
 
                 result = await asyncio.get_event_loop().run_in_executor(None, _run)
@@ -277,6 +280,12 @@ class MultiHorizonTrainer:
 
         # Final walk-forward with best params
         wf_cfg = self._build_wf_config(cfg, best_params, embargo_bars)
+
+        # Defensive clamp: if cfg requests more bars than dataset has,
+        # the splitter produces 0 folds and the runner crashes on an empty
+        # concat. Scale train_size/test_size down so at least one fold runs.
+        wf_cfg = self._clamp_wf_to_dataset(wf_cfg, len(X_feat), cfg.name)
+
         runner = WalkForwardRunner(wf_cfg)
         wf_result = runner.run(X_feat, y, prices=prices)
 
@@ -495,7 +504,7 @@ class MultiHorizonTrainer:
             model_class=("xgboost" if cfg.model_name == "xgb" else "deep_mlp"),
         )
         if mlp_p and hasattr(wf_cfg, "mlp_params"):
-            wf_cfg.mlp_params = mlp_p  # type: ignore[attr-defined]
+            wf_cfg.mlp_params = mlp_p
 
         return wf_cfg
 
@@ -505,6 +514,49 @@ class MultiHorizonTrainer:
         scaled.train_size = max(wf_cfg.train_size // 2, 50)
         scaled.test_size  = max(wf_cfg.test_size  // 2, 20)
         return scaled
+
+    def _clamp_wf_to_dataset(
+        self,
+        wf_cfg: WalkForwardConfig,
+        n_rows: int,
+        horizon_name: str,
+    ) -> WalkForwardConfig:
+        """
+        Ensure the WalkForwardConfig fits the dataset.
+
+        If ``train_size + test_size + embargo > n_rows`` the splitter
+        produces zero folds and the runner crashes on an empty concat.
+        Scale train/test down to guarantee at least one valid split,
+        logging a warning so the operator sees the adjustment.
+
+        Defensive only — production runs with sufficient data are unaffected.
+        """
+        required = wf_cfg.train_size + wf_cfg.test_size + wf_cfg.embargo
+        if required <= n_rows:
+            return wf_cfg
+
+        # Allocate ~60 % to train, ~20 % to test, leave embargo as-is.
+        # Floors keep the run statistically meaningful (or at least non-empty).
+        safe_train = max(int(n_rows * 0.6), 30)
+        safe_test  = max(int(n_rows * 0.2) // max(self.n_wf_splits, 1), 5)
+
+        # Final sanity: never exceed dataset minus embargo
+        budget = max(n_rows - wf_cfg.embargo - 1, 10)
+        if safe_train + safe_test > budget:
+            safe_train = max(budget - safe_test, 10)
+
+        logger.warning(
+            "MultiHorizonTrainer[%s]: dataset too small for requested config "
+            "(need %d bars, have %d). Clamping train_size=%d, test_size=%d, "
+            "embargo=%d.",
+            horizon_name, required, n_rows,
+            safe_train, safe_test, wf_cfg.embargo,
+        )
+
+        clamped = copy.copy(wf_cfg)
+        clamped.train_size = safe_train
+        clamped.test_size  = safe_test
+        return clamped
 
     def _select_features(self, X: pd.DataFrame, feature_names: list[str]) -> pd.DataFrame:
         """Keep only columns present in X; fill missing with 0."""
@@ -611,10 +663,28 @@ class MultiHorizonTrainer:
         y: pd.Series,
         best_params: dict[str, Any],
     ) -> Any:
-        """Re-fit final model on all data with best hyperparams."""
+        """
+        Re-fit final model on all data with best hyperparams.
+
+        Reproducibility contract
+        ------------------------
+        ``self.seed`` is the single source of truth — it is *always* injected
+        into the final model's params (overriding any seed Optuna may have
+        sampled).  Without this, hyperopt with degenerate / empty
+        ``best_params`` would produce identical artifacts across distinct
+        trainer seeds (see ``test_different_seed_different_model``).
+
+        XGBoost gets ``n_jobs=1`` to guarantee deterministic CPU execution.
+        """
+        params: dict[str, Any] = dict(best_params)
+        params["seed"]         = self.seed
+        params["random_state"] = self.seed
+        if cfg.model_name == "xgb":
+            params["n_jobs"] = 1
+
         model = get_model(
             "xgboost" if cfg.model_name == "xgb" else "deep_mlp",
-            **{k: v for k, v in best_params.items()},
+            **params,
         )
         model.fit(X, y)
         return model
@@ -732,8 +802,8 @@ class MultiHorizonTrainer:
             torch.manual_seed(seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(seed)
-            torch.backends.cudnn.deterministic = True  # type: ignore[attr-defined]
-            torch.backends.cudnn.benchmark = False     # type: ignore[attr-defined]
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
 
 
 # ============================================================================
