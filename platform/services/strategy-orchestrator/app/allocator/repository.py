@@ -1,7 +1,7 @@
 """
 AllocatorRepository — persistence + per-process cache + per-horizon lock.
 
-Schema (see infra/sql/migrations/009_allocator_state.sql)
+Schema (see platform/infra/sql/migrations/009_allocator_state.sql)
 ---------------------------------------------------------
 risk.allocator_state    — one row per horizon (α, β, last_update_ts)
 risk.allocator_updates  — append-only audit log; PK = update_id (UUID v7)

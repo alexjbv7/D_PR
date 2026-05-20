@@ -4,7 +4,8 @@
 -- Semana 9: Beta(α, β) posteriors per horizon + append-only audit log.
 --
 -- Execution:
---   psql $POSTGRES_DSN -f infra/sql/migrations/009_allocator_state.sql
+--   psql $POSTGRES_DSN -f platform/infra/sql/migrations/009_allocator_state.sql
+--   # or: cd platform && make db-migrate
 --
 -- Pre-requisites: risk schema (created in earlier migrations).
 -- ============================================================================

@@ -4,7 +4,7 @@
 
 .PHONY: help up down build logs ps clean frontend-dev \
         infra services monitoring frontend \
-        db-shell redis-cli kafka-topics kafka-create-topics \
+        db-shell db-migrate redis-cli kafka-topics kafka-create-topics \
         env test lint k8s-apply k8s-diff sec-research
 
 help:  ## Show this help
@@ -62,6 +62,14 @@ clean-volumes:  ## Remove data volumes only
 
 db-shell:  ## Open psql shell
 	docker-compose exec postgres psql -U trading -d trading_db
+
+db-migrate:  ## Apply SQL migrations (platform/infra/sql/migrations/*.sql in order)
+	@echo "Applying migrations from infra/sql/migrations/ ..."
+	@for f in $$(ls infra/sql/migrations/*.sql 2>/dev/null | sort); do \
+	  echo "  -> $$f"; \
+	  docker-compose exec -T postgres psql -U trading -d trading_db < $$f || exit 1; \
+	done
+	@echo "Migrations applied."
 
 redis-cli:  ## Open redis-cli
 	docker-compose exec redis redis-cli

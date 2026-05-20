@@ -1,7 +1,7 @@
 """
 DriftRepository — async TimescaleDB persistence for drift audit tables.
 
-Tables (created by infra/sql/migrations/008_drift_audit.sql):
+Tables (created by platform/infra/sql/migrations/008_drift_audit.sql):
   audit.predictions  — model predictions with deferred true labels
   drift.psi_history  — PSI readings per feature per horizon
   drift.ece_history  — ECE readings per horizon
@@ -47,17 +47,19 @@ class DriftRepository:
         psi: float,
         severity: str,
         n_buckets: int = 10,
+        macro_suppressed: bool = False,
     ) -> None:
         sql = """
             INSERT INTO drift.psi_history
-                (ts, horizon, model_version, feature_name, psi, severity, n_buckets)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                (ts, horizon, model_version, feature_name, psi, severity,
+                 n_buckets, macro_suppressed)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         """
         try:
             async with self._pool.acquire() as conn:
                 await conn.execute(
                     sql, ts, horizon, model_version,
-                    feature_name, psi, severity, n_buckets,
+                    feature_name, psi, severity, n_buckets, macro_suppressed,
                 )
         except Exception as exc:
             logger.error(
@@ -135,7 +137,11 @@ class DriftRepository:
         model_version: str,
         window_days: int = 7,
     ) -> list[dict[str, Any]]:
-        """Fetch labelled predictions from the last *window_days* days.
+        """Fetch labelled predictions from a closed day window.
+
+        Window is ``[t - window_days - 1, t - 1]`` in UTC — the current UTC
+        day is excluded so partial intraday data at cron time (03:00 UTC)
+        does not bias PSI/ECE.
 
         Returns rows as ``{"probas": [float, ...], "true_label": int}``.
         Only rows with ``true_label IS NOT NULL`` are returned.
@@ -146,7 +152,8 @@ class DriftRepository:
             WHERE horizon       = $1
               AND model_version = $2
               AND true_label IS NOT NULL
-              AND ts >= NOW() - ($3 * INTERVAL '1 day')
+              AND ts >= NOW() - (($3 + 1) * INTERVAL '1 day')
+              AND ts <  NOW() - INTERVAL '1 day'
             ORDER BY ts ASC
         """
         try:
@@ -198,17 +205,45 @@ class DriftRepository:
             )
             return []
 
+    async def insert_retrain(
+        self,
+        ts: datetime,
+        horizon: str,
+        model_version: str,
+        trigger_reason: str,
+        suppressed: bool,
+        psi_max: float,
+        ece: float,
+    ) -> None:
+        sql = """
+            INSERT INTO drift.retrain_history
+                (ts, horizon, model_version, trigger_reason, suppressed, psi_max, ece)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        """
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    sql, ts, horizon, model_version,
+                    trigger_reason, suppressed, psi_max, ece,
+                )
+        except Exception as exc:
+            logger.error(
+                "drift_repo.insert_retrain.error",
+                horizon=horizon, error=str(exc),
+            )
+
     async def fetch_recent_feature_values(
         self,
         feature_name: str,
         window_days: int = 7,
         limit: int = 2000,
     ) -> list[float]:
-        """Return feature values from the last *window_days* days."""
+        """Return feature values from a closed day window (excludes today UTC)."""
         sql = """
             SELECT (features->>$1)::float AS val
             FROM features.online
-            WHERE ts >= NOW() - ($2 * INTERVAL '1 day')
+            WHERE ts >= NOW() - (($2 + 1) * INTERVAL '1 day')
+              AND ts <  NOW() - INTERVAL '1 day'
               AND features ? $1
             ORDER BY ts DESC
             LIMIT $3

@@ -4,7 +4,8 @@
 -- Semana 8: PSI history, ECE history, and model predictions for audit.
 --
 -- Execution:
---   psql $POSTGRES_DSN -f infra/sql/migrations/008_drift_audit.sql
+--   psql $POSTGRES_DSN -f platform/infra/sql/migrations/008_drift_audit.sql
+--   # or: cd platform && make db-migrate
 --
 -- Requires: TimescaleDB extension already enabled (see earlier migrations).
 -- ============================================================================
@@ -56,13 +57,14 @@ CREATE INDEX IF NOT EXISTS ix_predictions_labelled
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS drift.psi_history (
-    ts              TIMESTAMPTZ  NOT NULL,
-    horizon         TEXT         NOT NULL,
-    model_version   TEXT         NOT NULL,
-    feature_name    TEXT         NOT NULL,
-    psi             FLOAT        NOT NULL,
-    severity        TEXT         NOT NULL,   -- "stable" | "moderate" | "severe"
-    n_buckets       INT          NOT NULL DEFAULT 10
+    ts               TIMESTAMPTZ  NOT NULL,
+    horizon          TEXT         NOT NULL,
+    model_version    TEXT         NOT NULL,
+    feature_name     TEXT         NOT NULL,
+    psi              FLOAT        NOT NULL,
+    severity         TEXT         NOT NULL,   -- "stable" | "moderate" | "severe"
+    n_buckets        INT          NOT NULL DEFAULT 10,
+    macro_suppressed BOOLEAN      NOT NULL DEFAULT FALSE
 );
 
 SELECT create_hypertable(
@@ -100,6 +102,29 @@ CREATE INDEX IF NOT EXISTS ix_ece_horizon
     ON drift.ece_history (horizon, ts DESC);
 
 -- ---------------------------------------------------------------------------
+-- drift.retrain_history — audit trail for retrain triggers (Grafana panel 4)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS drift.retrain_history (
+    ts              TIMESTAMPTZ  NOT NULL,
+    horizon         TEXT         NOT NULL,
+    model_version   TEXT         NOT NULL,
+    trigger_reason  TEXT         NOT NULL,
+    suppressed      BOOLEAN      NOT NULL,
+    psi_max         FLOAT        NOT NULL DEFAULT 0,
+    ece             FLOAT        NOT NULL DEFAULT 0
+);
+
+SELECT create_hypertable(
+    'drift.retrain_history', 'ts',
+    if_not_exists => TRUE,
+    chunk_time_interval => INTERVAL '30 days'
+);
+
+CREATE INDEX IF NOT EXISTS ix_retrain_horizon
+    ON drift.retrain_history (horizon, ts DESC);
+
+-- ---------------------------------------------------------------------------
 -- Retention policies (90 days warm tier)
 -- ---------------------------------------------------------------------------
 
@@ -113,4 +138,8 @@ SELECT add_retention_policy(
 
 SELECT add_retention_policy(
     'drift.ece_history', INTERVAL '90 days', if_not_exists => TRUE
+);
+
+SELECT add_retention_policy(
+    'drift.retrain_history', INTERVAL '90 days', if_not_exists => TRUE
 );
