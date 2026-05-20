@@ -324,6 +324,48 @@ async def test_bracket_fractional_equity_rejected(adapter: AlpacaAdapter) -> Non
         await adapter.submit(intent)
 
 
+async def test_bracket_notional_fractional_rejected(adapter: AlpacaAdapter) -> None:
+    intent = OrderIntent(
+        symbol="AAPL",
+        side=OrderSide.BUY,
+        notional=Decimal("50"),
+        order_type=OrderType.LIMIT,
+        limit_price=Decimal("150"),
+        tp_price=Decimal("160"),
+        sl_price=Decimal("140"),
+        tif=TimeInForce.DAY,
+    )
+    with pytest.raises(FractionalShareNotAllowedError, match="requires qty"):
+        await adapter.submit(intent)
+
+
+async def test_oco_notional_fractional_rejected(adapter: AlpacaAdapter) -> None:
+    intent = OrderIntent(
+        symbol="AAPL",
+        side=OrderSide.BUY,
+        notional=Decimal("50"),
+        order_type=OrderType.LIMIT,
+        limit_price=Decimal("150"),
+        sl_price=Decimal("140"),
+        tif=TimeInForce.DAY,
+    )
+    with pytest.raises(FractionalShareNotAllowedError, match="requires qty"):
+        await adapter.submit(intent)
+
+
+async def test_trailing_notional_fractional_rejected(adapter: AlpacaAdapter) -> None:
+    intent = OrderIntent(
+        symbol="AAPL",
+        side=OrderSide.BUY,
+        notional=Decimal("50"),
+        order_type=OrderType.TRAILING_STOP,
+        trail_percent=Decimal("1.5"),
+        tif=TimeInForce.DAY,
+    )
+    with pytest.raises(FractionalShareNotAllowedError, match="requires qty"):
+        await adapter.submit(intent)
+
+
 # ---------------------------------------------------------------------------
 # Group F — E2E submit
 # ---------------------------------------------------------------------------

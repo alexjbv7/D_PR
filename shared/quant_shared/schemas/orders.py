@@ -24,7 +24,7 @@ import uuid as _uuid_mod
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -239,7 +239,7 @@ class Fill(BaseModel):
     ts:        datetime  = Field(default_factory=_utcnow)
     venue:      str       = ""
     account_id: str       = ""
-    raw:        dict      = Field(default_factory=dict)
+    raw:        dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("qty", "price", "fee", mode="before")
     @classmethod

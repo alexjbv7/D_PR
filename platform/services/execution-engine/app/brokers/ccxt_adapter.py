@@ -52,11 +52,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 try:
-    import ccxt.async_support as _ccxt           # type: ignore
+    import ccxt.async_support as _ccxt  # type: ignore[import-not-found]
     _HAS_CCXT = True
 except ImportError:                              # pragma: no cover
     _HAS_CCXT = False
-    _ccxt = None                                  # type: ignore[assignment]
+    _ccxt = None
 
 
 # Supported venue → ccxt class name (must match ccxt module attribute)
@@ -105,13 +105,15 @@ class CCXTConfig:
         testnet:     Optional[bool] = None,
         market_type: Optional[str]  = None,
     ):
-        self.exchange   = (exchange   or os.getenv("CCXT_EXCHANGE",   "binance")).lower()
+        exchange_value = exchange or os.getenv("CCXT_EXCHANGE") or "binance"
+        market_type_value = market_type or os.getenv("CCXT_MARKET_TYPE") or "spot"
+        self.exchange   = exchange_value.lower()
         self.api_key    =  api_key    or os.getenv("CCXT_API_KEY",    "")
         self.api_secret =  api_secret or os.getenv("CCXT_API_SECRET", "")
         if testnet is None:
             testnet = os.getenv("CCXT_TESTNET", "true").lower() == "true"
         self.testnet = testnet
-        self.market_type = (market_type or os.getenv("CCXT_MARKET_TYPE", "spot")).lower()
+        self.market_type = market_type_value.lower()
 
         if self.exchange not in _SUPPORTED_VENUES:
             raise BrokerError(
@@ -255,7 +257,7 @@ class CCXTAdapter(BrokerAdapter):
             raise BrokerError(f"Unsupported order_type for CCXT: {intent.order_type}")
         return mapping[intent.order_type]
 
-    def _ccxt_params(self, intent: OrderIntent) -> dict:
+    def _ccxt_params(self, intent: OrderIntent) -> dict[str, Any]:
         """Build the ``params`` dict for ccxt.create_order."""
         params: dict[str, Any] = {}
         if intent.order_type == OrderType.LIMIT_MAKER:
@@ -267,7 +269,7 @@ class CCXTAdapter(BrokerAdapter):
         return params
 
     @staticmethod
-    def _status_to_internal(raw: dict) -> OrderStatus:
+    def _status_to_internal(raw: dict[str, Any]) -> OrderStatus:
         """Translate ccxt unified status (+ filled qty) → our enum."""
         status = (raw.get("status") or "").lower()
         filled = float(raw.get("filled") or 0)
@@ -287,7 +289,7 @@ class CCXTAdapter(BrokerAdapter):
             return OrderStatus.SUBMITTED
         return OrderStatus.SUBMITTED        # safe default
 
-    def _ccxt_order_to_result(self, raw: dict, intent_id: str = "") -> OrderResult:
+    def _ccxt_order_to_result(self, raw: dict[str, Any], intent_id: str = "") -> OrderResult:
         """Translate a ccxt unified order dict → :class:`OrderResult`."""
         side       = OrderSide(str(raw.get("side", "buy")).lower())
         status     = self._status_to_internal(raw)
@@ -313,7 +315,7 @@ class CCXTAdapter(BrokerAdapter):
             venue        = self.venue,
         )
 
-    def _spot_balance_to_positions(self, balance: dict) -> list[Position]:
+    def _spot_balance_to_positions(self, balance: dict[str, Any]) -> list[Position]:
         """Spot mode: synthesise long positions from non-zero asset balances."""
         positions: list[Position] = []
         for asset, info in balance.items():
@@ -334,7 +336,7 @@ class CCXTAdapter(BrokerAdapter):
             ))
         return positions
 
-    def _swap_position_to_internal(self, raw: dict) -> Position:
+    def _swap_position_to_internal(self, raw: dict[str, Any]) -> Position:
         """Swap mode: map a ccxt position dict → :class:`Position`."""
         contracts = float(raw.get("contracts", 0))
         side = OrderSide.BUY if str(raw.get("side", "long")).lower() == "long" else OrderSide.SELL
@@ -358,6 +360,8 @@ class CCXTAdapter(BrokerAdapter):
         ccxt_sym = sym_map.to_ccxt(intent.symbol)
         ord_type = self._ccxt_order_type(intent)
         side     = intent.side.value
+        if intent.qty is None:
+            raise BrokerError("OrderIntent.qty is required for CCXT orders")
         amount   = float(intent.qty)
         price    = float(intent.limit_price) if intent.limit_price is not None else None
         params   = self._ccxt_params(intent)

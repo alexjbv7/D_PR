@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Any
 from typing import Optional
 
 
@@ -60,7 +61,7 @@ class TradeSignal:
             and self.confidence >= min_confidence
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "signal_id":   self.signal_id,
             "symbol":      self.symbol,

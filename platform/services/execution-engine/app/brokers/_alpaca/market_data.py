@@ -43,11 +43,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 try:
-    from alpaca.data.historical import (                                # type: ignore
+    from alpaca.data.historical import (
         CryptoHistoricalDataClient,
         StockHistoricalDataClient,
     )
-    from alpaca.data.requests import (                                  # type: ignore
+    from alpaca.data.requests import (
         CryptoBarsRequest,
         CryptoLatestQuoteRequest,
         CryptoSnapshotRequest,
@@ -55,7 +55,7 @@ try:
         StockLatestQuoteRequest,
         StockSnapshotRequest,
     )
-    from alpaca.data.timeframe import TimeFrame, TimeFrameUnit          # type: ignore
+    from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
     _HAS_DATA_SDK = True
 except ImportError:  # pragma: no cover
     _HAS_DATA_SDK = False
@@ -71,7 +71,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 
 try:
-    from prometheus_client import Counter, Histogram  # type: ignore[import-untyped]
+    from prometheus_client import Counter, Histogram
 
     DATA_REQUESTS = Counter(
         "alpaca_data_requests_total",
@@ -134,7 +134,7 @@ def resolve_timeframe(tf: str) -> Any:
 # Bar dataclass (plain dict — no Pydantic dependency inside broker layer)
 # ---------------------------------------------------------------------------
 
-def _bar_to_dict(bar: Any, symbol: str) -> dict:
+def _bar_to_dict(bar: Any, symbol: str) -> dict[str, Any]:
     """Normalise an alpaca-py Bar object → plain dict."""
     return {
         "symbol":    symbol,
@@ -182,7 +182,7 @@ class AlpacaMarketData:
             )
         self._api_key    = api_key
         self._api_secret = api_secret or ""
-        self._feed       = feed
+        self._feed: Any = feed
         self._rate_limiter = rate_limiter or AlpacaRateLimiter()
 
         self._stock_client:  Any = None
@@ -224,7 +224,7 @@ class AlpacaMarketData:
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
         limit: int = 200,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """
         Fetch historical OHLCV bars.
 
@@ -254,7 +254,7 @@ class AlpacaMarketData:
             return await self._get_crypto_bars(symbol, tf, start, end, limit)
         return await self._get_stock_bars(symbol, tf, start, end, limit)
 
-    async def get_latest_bar(self, symbol: str) -> Optional[dict]:
+    async def get_latest_bar(self, symbol: str) -> Optional[dict[str, Any]]:
         """Return the most recent completed bar for *symbol*."""
         await self._rate_limiter.acquire("data")
         _record("bars")
@@ -269,7 +269,7 @@ class AlpacaMarketData:
             logger.warning("market_data.latest_bar_failed %s: %s", symbol, exc)
             return None
 
-    async def get_latest_quote(self, symbol: str) -> Optional[dict]:
+    async def get_latest_quote(self, symbol: str) -> Optional[dict[str, Any]]:
         """Return the latest bid/ask quote for *symbol*."""
         await self._rate_limiter.acquire("data")
         _record("quote")
@@ -291,7 +291,7 @@ class AlpacaMarketData:
             logger.warning("market_data.latest_quote_failed %s: %s", symbol, exc)
             return None
 
-    async def get_snapshot(self, symbol: str) -> Optional[dict]:
+    async def get_snapshot(self, symbol: str) -> Optional[dict[str, Any]]:
         """
         Return a full snapshot: latest quote + trade + minute bar + daily bar.
         """
@@ -344,7 +344,7 @@ class AlpacaMarketData:
     @retry_with_jitter(max_attempts=3, base_delay=0.5)
     async def _get_stock_bars(
         self, symbol: str, tf: Any, start: Any, end: Any, limit: int,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         req = StockBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=tf,
@@ -394,7 +394,7 @@ class AlpacaMarketData:
     @retry_with_jitter(max_attempts=3, base_delay=0.5)
     async def _get_crypto_bars(
         self, symbol: str, tf: Any, start: Any, end: Any, limit: int,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         req = CryptoBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=tf,
@@ -440,7 +440,7 @@ class AlpacaMarketData:
     # -----------------------------------------------------------------------
 
     @staticmethod
-    def _snapshot_to_dict(snap: Any, symbol: str) -> dict:
+    def _snapshot_to_dict(snap: Any, symbol: str) -> dict[str, Any]:
         """Normalise an alpaca-py Snapshot → plain dict."""
         result: dict[str, Any] = {"symbol": symbol}
 

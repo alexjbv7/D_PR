@@ -45,11 +45,21 @@ def _is_whole_share(qty: Decimal) -> bool:
     return qty == qty.to_integral_value()
 
 
-def _validate_fractional_bracket(intent: OrderIntent) -> None:
-    """Bracket orders do not support fractional share qty on equities."""
-    if not _is_whole_share(intent.qty):
+def _require_qty_for_composite_order(intent: OrderIntent) -> Decimal:
+    """Alpaca bracket / OTO / trailing orders require explicit whole-share qty."""
+    if intent.qty is None:
         raise FractionalShareNotAllowedError(
-            f"Bracket orders require whole-share qty; got {intent.qty}"
+            "Composite order requires qty; notional fractional orders "
+            "are not supported by Alpaca for composite orders"
+        )
+    return intent.qty
+
+
+def _validate_whole_share_qty(qty: Decimal) -> None:
+    """Bracket orders do not support fractional share qty on equities."""
+    if not _is_whole_share(qty):
+        raise FractionalShareNotAllowedError(
+            f"Bracket orders require whole-share qty; got {qty}"
         )
 
 
@@ -103,8 +113,9 @@ def build_bracket_request(
     """LimitOrderRequest with OrderClass.BRACKET + take_profit + stop_loss."""
     _validate_bracket_pricing(intent)
     _validate_crypto_compatibility(intent, has_bracket=True)
+    qty = _require_qty_for_composite_order(intent)
     if not sym_map.is_crypto(intent.symbol):
-        _validate_fractional_bracket(intent)
+        _validate_whole_share_qty(qty)
 
     LimitOrderRequest = ac_classes["LimitOrderRequest"]
     TakeProfitRequest = ac_classes["TakeProfitRequest"]
@@ -117,7 +128,7 @@ def build_bracket_request(
 
     return LimitOrderRequest(
         symbol=alpaca_sym,
-        qty=float(intent.qty),
+        qty=float(qty),
         side=side,
         time_in_force=tif,
         limit_price=float(intent.limit_price),
@@ -139,6 +150,7 @@ def build_oco_request(
     """OTO with stop_loss and/or take_profit leg (single exit leg)."""
     if intent.limit_price is None:
         raise BracketRejectedError("OTO requires limit_price as entry.")
+    qty = _require_qty_for_composite_order(intent)
 
     LimitOrderRequest = ac_classes["LimitOrderRequest"]
     TakeProfitRequest = ac_classes["TakeProfitRequest"]
@@ -147,7 +159,7 @@ def build_oco_request(
 
     kwargs: dict[str, Any] = dict(
         symbol=alpaca_sym,
-        qty=float(intent.qty),
+        qty=float(qty),
         side=side,
         time_in_force=tif,
         limit_price=float(intent.limit_price),
@@ -171,6 +183,7 @@ def build_trailing_request(
 ) -> Any:
     """TrailingStopOrderRequest — XOR trail_percent or trail_price."""
     TrailingStopOrderRequest = ac_classes["TrailingStopOrderRequest"]
+    qty = _require_qty_for_composite_order(intent)
 
     if intent.trail_percent is not None and intent.trail_price is not None:
         raise TrailingStopRejectedError(
@@ -183,7 +196,7 @@ def build_trailing_request(
 
     kwargs: dict[str, Any] = dict(
         symbol=alpaca_sym,
-        qty=float(intent.qty),
+        qty=float(qty),
         side=side,
         time_in_force=tif,
         extended_hours=intent.extended_hours,

@@ -30,7 +30,8 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Optional
+from types import TracebackType
+from typing import Any, Optional
 
 from quant_shared.schemas.orders import OrderIntent, OrderResult, Position
 
@@ -79,7 +80,7 @@ class AccountInfo:
         Base currency (default "USD").
     is_paper : bool
         True when connected to a paper / sandbox environment.
-    raw : dict
+    raw : dict[str, Any]
         Verbatim broker response for debugging.
     """
 
@@ -91,7 +92,7 @@ class AccountInfo:
     pnl_day:     Decimal = field(default_factory=lambda: Decimal("0"))
     currency:    str     = "USD"
     is_paper:    bool    = True
-    raw:         dict    = field(default_factory=dict)
+    raw:         dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +137,12 @@ class BrokerAdapter(ABC):
         await self.connect()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         await self.close()
 
     @abstractmethod
