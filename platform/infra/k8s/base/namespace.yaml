@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: los-ojos
+  labels:
+    app.kubernetes.io/name: los-ojos
+    app.kubernetes.io/part-of: los-ojos-platform

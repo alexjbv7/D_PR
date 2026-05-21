@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: los-ojos-config
+  namespace: los-ojos
+data:
+  KAFKA_SERVERS:      "kafka-service:9092"
+  REDIS_URL:          "redis://redis-service:6379/0"
+  POSTGRES_HOST:      "postgres-service"
+  POSTGRES_PORT:      "5432"
+  POSTGRES_DB:        "los_ojos"
+  LOG_LEVEL:          "INFO"
+  USE_FINBERT:        "false"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: los-ojos-service-urls
+  namespace: los-ojos
+data:
+  MARKET_INTELLIGENCE_URL:  "http://market-intelligence:8000"
+  MACROECONOMIC_URL:        "http://macroeconomic:8000"
+  ONCHAIN_URL:              "http://onchain-analysis:8000"
+  CONTEXT_ENGINE_URL:       "http://context-engine:8000"
+  ML_FEATURE_STORE_URL:     "http://ml-feature-store:8000"
+  REALTIME_SIGNAL_URL:      "http://realtime-signal:8000"
+  STRATEGY_ORCHESTRATOR_URL: "http://strategy-orchestrator:8000"
+  SEC_RESEARCH_URL:         "http://sec-research:8000"

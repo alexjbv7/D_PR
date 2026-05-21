@@ -1,0 +1,99 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-bg:           #0f172a;
+    --color-bg-secondary: #1e293b;
+    --color-bg-tertiary:  #334155;
+    --color-text:         #f1f5f9;
+    --color-text-muted:   #94a3b8;
+    --color-border:       #334155;
+    --color-accent:       #3b82f6;
+    --color-up:           #22c55e;
+    --color-down:         #ef4444;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: var(--color-bg);
+    color:            var(--color-text);
+    font-family:      'Inter', system-ui, sans-serif;
+    font-size:        14px;
+    line-height:      1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Monospace for numbers */
+  .font-mono,
+  .tabular-nums {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-feature-settings: "tnum";
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width:  6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--color-bg);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-bg-tertiary);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-text-muted);
+  }
+
+  /* Selection */
+  ::selection {
+    background: rgba(59, 130, 246, 0.3);
+    color:      var(--color-text);
+  }
+}
+
+@layer components {
+  /* Card */
+  .card {
+    @apply bg-slate-800/50 border border-slate-700/50 rounded-xl p-4;
+  }
+
+  /* Stat badge */
+  .stat-up   { @apply text-green-400 font-mono; }
+  .stat-down { @apply text-red-400   font-mono; }
+  .stat-flat { @apply text-slate-400 font-mono; }
+
+  /* Status dot */
+  .dot-connected    { @apply bg-green-400; }
+  .dot-disconnected { @apply bg-red-400;   }
+  .dot-connecting   { @apply bg-yellow-400 animate-pulse; }
+
+  /* Signal badge */
+  .signal-long  { @apply bg-green-500/10 text-green-400 border border-green-500/30; }
+  .signal-short { @apply bg-red-500/10   text-red-400   border border-red-500/30;   }
+  .signal-flat  { @apply bg-slate-500/10 text-slate-400 border border-slate-500/30; }
+}
+
+@layer utilities {
+  .text-balance { text-wrap: balance; }
+
+  /* Glow effects */
+  .glow-green { box-shadow: 0 0 20px rgba(34, 197, 94,  0.15); }
+  .glow-red   { box-shadow: 0 0 20px rgba(239, 68,  68,  0.15); }
+  .glow-blue  { box-shadow: 0 0 20px rgba(59,  130, 246, 0.15); }
+
+  /* Gradient text */
+  .text-gradient-up   { background: linear-gradient(135deg, #22c55e, #86efac); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .text-gradient-down { background: linear-gradient(135deg, #ef4444, #fca5a5); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .text-gradient-blue { background: linear-gradient(135deg, #3b82f6, #93c5fd); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+}

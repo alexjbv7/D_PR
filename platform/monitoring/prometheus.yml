@@ -1,0 +1,97 @@
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'los-ojos'
+    env:     'production'
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+rule_files:
+  # - "rules/*.yml"
+
+scrape_configs:
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # ── Microservices ────────────────────────────────────────────────────────
+  - job_name: 'market-intelligence'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['market-intelligence:8000']
+        labels:
+          service: 'market-intelligence'
+
+  - job_name: 'macroeconomic'
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['macroeconomic:8000']
+        labels:
+          service: 'macroeconomic'
+
+  - job_name: 'onchain-analysis'
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['onchain-analysis:8000']
+        labels:
+          service: 'onchain-analysis'
+
+  - job_name: 'context-engine'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['context-engine:8000']
+        labels:
+          service: 'context-engine'
+
+  - job_name: 'realtime-signal'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['realtime-signal:8000']
+        labels:
+          service: 'realtime-signal'
+
+  - job_name: 'ml-feature-store'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['ml-feature-store:8000']
+        labels:
+          service: 'ml-feature-store'
+
+  - job_name: 'strategy-orchestrator'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['strategy-orchestrator:8000']
+        labels:
+          service: 'strategy-orchestrator'
+
+  # ── Infrastructure ───────────────────────────────────────────────────────
+  - job_name: 'kafka'
+    static_configs:
+      - targets: ['kafka:9101']
+        labels:
+          service: 'kafka'
+
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:9121']
+        labels:
+          service: 'redis'
+
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres:9187']
+        labels:
+          service: 'postgres'

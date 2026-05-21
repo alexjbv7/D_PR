@@ -1,0 +1,78 @@
+name: Shared — Parity Tests
+
+# Este workflow es el guardián más crítico del monorepo.
+# Corre ANTES que research-ci y platform-ci.
+# Si falla: hay divergencia entre los 19 features de research y platform.
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "shared/**"
+      - ".github/workflows/shared-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "shared/**"
+      - "research/features/**"
+      - "platform/services/ml-feature-store/**"
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  parity-tests:
+    name: Feature parity — shared/quant_shared
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install quant_shared
+        run: pip install -e shared/
+
+      - name: Lint shared/
+        run: |
+          pip install ruff
+          ruff check shared/quant_shared
+
+      - name: Type check shared/
+        run: |
+          pip install mypy
+          mypy shared/quant_shared --ignore-missing-imports
+
+      - name: Run parity tests (36 tests — guardianes del monorepo)
+        run: |
+          pip install pytest pytest-asyncio numpy pydantic
+          cd shared && python -m pytest tests/ -v --tb=short
+
+      - name: Verify feature count is exactly 19
+        run: |
+          python -c "
+          from quant_shared.features import FEATURE_COUNT, FEATURE_NAMES
+          assert FEATURE_COUNT == 19, f'Expected 19 features, got {FEATURE_COUNT}'
+          print(f'OK — {FEATURE_COUNT} features: {FEATURE_NAMES}')
+          "
+
+      - name: Verify all event schemas importable
+        run: |
+          python -c "
+          from quant_shared.schemas.events import (
+              KafkaTopics, FinalSignalEvent, WhaleAlertEvent,
+              MacroRegimeEvent, AnomalyEvent, KillSwitchEvent
+          )
+          print('OK — all event schemas importable')
+          "
+
+      - name: Verify model registry
+        run: |
+          python -c "
+          from quant_shared.models import ModelRegistry, ModelCard
+          r = ModelRegistry()
+          print('OK — ModelRegistry instantiated')
+          "

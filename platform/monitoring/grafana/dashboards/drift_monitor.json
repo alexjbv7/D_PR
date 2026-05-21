@@ -1,0 +1,179 @@
+{
+  "__inputs": [],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0" },
+    { "type": "datasource", "id": "postgres", "name": "PostgreSQL", "version": "1.0.0" }
+  ],
+  "annotations": { "list": [] },
+  "description": "Drift Detection & Retraining Monitoring — Semana 8",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_TIMESCALEDB}" },
+      "description": "Latest PSI per feature, per horizon. Red = severe (≥0.25), yellow = moderate (≥0.10).",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.1 },
+              { "color": "red",    "value": 0.25 }
+            ]
+          },
+          "displayName": "${__field.labels.feature_name}",
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "show": false },
+        "showHeader": true
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_TIMESCALEDB}" },
+          "rawQuery": true,
+          "rawSql": "SELECT\n  horizon,\n  feature_name,\n  ROUND(psi::numeric, 4) AS psi,\n  severity,\n  ts\nFROM drift.psi_history\nWHERE ts >= NOW() - INTERVAL '2 days'\nORDER BY psi DESC\nLIMIT 60;",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "title": "PSI Heatmap — Latest Readings",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_TIMESCALEDB}" },
+      "description": "Rolling ECE per horizon over the last 30 days. Dashed line at 0.05 threshold.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 2, "spanNulls": false },
+          "color": { "mode": "palette-classic" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red",   "value": 0.05 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_TIMESCALEDB}" },
+          "rawQuery": true,
+          "rawSql": "SELECT\n  time_bucket('1 day', ts) AS time,\n  horizon,\n  AVG(ece) AS ece\nFROM drift.ece_history\nWHERE ts >= NOW() - INTERVAL '30 days'\nGROUP BY 1, 2\nORDER BY 1;",
+          "refId": "A",
+          "format": "time_series"
+        }
+      ],
+      "title": "ECE Timeline (rolling 30 days)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_TIMESCALEDB}" },
+      "description": "Count of drift events per day, colour-coded by severity.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 1, "fillOpacity": 20 },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "id": 3,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_TIMESCALEDB}" },
+          "rawQuery": true,
+          "rawSql": "SELECT\n  time_bucket('1 day', ts) AS time,\n  severity,\n  COUNT(*) AS event_count\nFROM drift.psi_history\nWHERE ts >= NOW() - INTERVAL '30 days'\n  AND severity != 'stable'\nGROUP BY 1, 2\nORDER BY 1;",
+          "refId": "A",
+          "format": "time_series"
+        }
+      ],
+      "title": "Drift Events per Day (non-stable PSI)",
+      "type": "barchart"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_TIMESCALEDB}" },
+      "description": "Count of suppressed vs triggered retrain events per day.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 2 },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "suppressed" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "triggered" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "id": 4,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_TIMESCALEDB}" },
+          "rawQuery": true,
+          "rawSql": "-- Proxy: count DriftDetected events from psi_history as triggered / suppressed\n-- (real table would be audit.retrain_triggers; this is a monitoring approximation)\nSELECT\n  time_bucket('1 day', ts) AS time,\n  SUM(CASE WHEN severity = 'severe' THEN 1 ELSE 0 END) AS triggered,\n  0 AS suppressed\nFROM drift.psi_history\nWHERE ts >= NOW() - INTERVAL '30 days'\nGROUP BY 1\nORDER BY 1;",
+          "refId": "A",
+          "format": "time_series"
+        }
+      ],
+      "title": "Retrain Triggers vs Macro Suppressions",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 38,
+  "tags": ["ml", "drift", "monitoring", "semana-8"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "name": "DS_TIMESCALEDB",
+        "options": [],
+        "query": "postgres",
+        "refresh": 1,
+        "type": "datasource",
+        "label": "TimescaleDB"
+      }
+    ]
+  },
+  "time": { "from": "now-7d", "to": "now" },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "Drift Monitor — S8",
+  "uid": "drift-monitor-s8",
+  "version": 1
+}

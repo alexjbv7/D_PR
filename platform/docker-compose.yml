@@ -1,0 +1,419 @@
+version: "3.9"
+
+# ============================================================================
+# Los Ojos — Full Stack docker-compose
+# ============================================================================
+# Comando: docker-compose up -d
+# Dashboard: http://localhost:3000
+# Realtime WS: ws://localhost:8005/ws
+# Grafana: http://localhost:3001 (admin/admin)
+# Kafka UI: http://localhost:8080
+
+networks:
+  los-ojos-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  mongodb-data:
+  kafka-data:
+  zookeeper-data:
+  prometheus-data:
+  grafana-data:
+
+
+# ============================================================================
+# INFRASTRUCTURE
+# ============================================================================
+
+services:
+
+  # ── Zookeeper (Kafka dependency) ────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    hostname: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+    networks: [los-ojos-net]
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo 'ruok' | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Kafka ────────────────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    hostname: kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_NUM_PARTITIONS: 4
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_COMPRESSION_TYPE: lz4
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks: [los-ojos-net]
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 15s
+      retries: 10
+
+  # ── Kafka UI ─────────────────────────────────────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    depends_on: [kafka]
+    ports:
+      - "8082:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    networks: [los-ojos-net]
+
+  # ── PostgreSQL + TimescaleDB ─────────────────────────────────────────────────
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    hostname: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER:     trading
+      POSTGRES_PASSWORD: trading
+      POSTGRES_DB:       trading_db
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    networks: [los-ojos-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    hostname: redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+        --maxmemory 512mb
+        --maxmemory-policy allkeys-lru
+        --appendonly yes
+        --save 60 100
+    volumes:
+      - redis-data:/data
+    networks: [los-ojos-net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── MongoDB ──────────────────────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7.0
+    hostname: mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: los_ojos
+    volumes:
+      - mongodb-data:/data/db
+    networks: [los-ojos-net]
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+  # ============================================================================
+  # MICROSERVICES
+  # ============================================================================
+
+  # ── Market Intelligence ───────────────────────────────────────────────────────
+  market-intelligence:
+    build:
+      context: ..
+      dockerfile: platform/services/market-intelligence/Dockerfile
+    hostname: market-intelligence
+    ports:
+      - "8001:8000"
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL:               redis://redis:6379/0
+      POSTGRES_DSN:            postgresql://trading:trading@postgres:5432/trading_db
+    depends_on:
+      kafka:    { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    networks: [los-ojos-net]
+    restart: unless-stopped
+
+  # ── Macroeconomic ─────────────────────────────────────────────────────────────
+  macroeconomic:
+    build:
+      context: ..
+      dockerfile: platform/services/macroeconomic/Dockerfile
+    hostname: macroeconomic
+    ports:
+      - "8002:8000"
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL:               redis://redis:6379/0
+      POSTGRES_DSN:            postgresql://trading:trading@postgres:5432/trading_db
+    depends_on:
+      kafka:    { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    networks: [los-ojos-net]
+    restart: unless-stopped
+
+  # ── On-chain Analysis ─────────────────────────────────────────────────────────
+  onchain-analysis:
+    build:
+      context: ..
+      dockerfile: platform/services/onchain-analysis/Dockerfile
+    hostname: onchain-analysis
+    ports:
+      - "8003:8000"
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL:               redis://redis:6379/0
+    depends_on:
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [los-ojos-net]
+    restart: unless-stopped
+
+  # ── Context Engine ────────────────────────────────────────────────────────────
+  context-engine:
+    build:
+      context: ..
+      dockerfile: platform/services/context-engine/Dockerfile
+    hostname: context-engine
+    ports:
+      - "8004:8000"
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL:               redis://redis:6379/0
+    depends_on:
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [los-ojos-net]
+    restart: unless-stopped
+
+  # ── Realtime Signal (WebSocket) ───────────────────────────────────────────────
+  realtime-signal:
+    build:
+      context: ..
+      dockerfile: platform/services/realtime-signal/Dockerfile
+    hostname: realtime-signal
+    ports:
+      - "8005:8000"
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL:               redis://redis:6379/0
+      REDIS_PUBSUB_URL:        redis://redis:6379/1
+      CORS_ORIGINS:            "http://localhost:3000,http://localhost:5173"
+    depends_on:
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [los-ojos-net]
+    restart: unless-stopped
+
+  # ── ML Feature Store ──────────────────────────────────────────────────────────
+  ml-feature-store:
+    build:
+      context: ..
+      dockerfile: platform/services/ml-feature-store/Dockerfile
+    hostname: ml-feature-store
+    ports:
+      - "8006:8000"
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL:               redis://redis:6379/0
+      POSTGRES_DSN:            postgresql://trading:trading@postgres:5432/trading_db
+    depends_on:
+      kafka:    { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    networks: [los-ojos-net]
+    restart: unless-stopped
+
+  # ── Strategy Orchestrator ─────────────────────────────────────────────────────
+  strategy-orchestrator:
+    build:
+      context: ..
+      dockerfile: platform/services/strategy-orchestrator/Dockerfile
+    hostname: strategy-orchestrator
+    ports:
+      - "8007:8000"
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL:               redis://redis:6379/0
+      POSTGRES_DSN:            postgresql://trading:trading@postgres:5432/trading_db
+    depends_on:
+      kafka:    { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    networks: [los-ojos-net]
+    restart: unless-stopped
+
+  # ── Execution Engine ─────────────────────────────────────────────────────────
+  execution-engine:
+    build:
+      context: ..
+      dockerfile: platform/services/execution-engine/Dockerfile
+    hostname: execution-engine
+    ports:
+      - "8010:8000"
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL:               redis://redis:6379/0
+      POSTGRES_DSN:            postgresql://trading:trading@postgres:5432/trading_db
+      # broker creds (set in .env)
+      ALPACA_ENABLED:    "true"
+      ALPACA_PAPER:      "true"
+      CCXT_ENABLED:      "false"
+      CCXT_TESTNET:      "true"
+      # risk
+      RISK_REQUIRE_PAPER: "true"
+    depends_on:
+      kafka:    { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    networks: [los-ojos-net]
+    restart: unless-stopped
+
+  # ── SEC Research ─────────────────────────────────────────────────────────────
+  sec-research:
+    build:
+      context: ..
+      dockerfile: platform/services/sec-research/Dockerfile
+    hostname: sec-research
+    ports:
+      - "8008:8000"
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL:               redis://redis:6379/0
+      POSTGRES_DSN:            postgresql://trading:trading@postgres:5432/trading_db
+    depends_on:
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [los-ojos-net]
+    restart: unless-stopped
+
+  # ── OpenBB Adapter ───────────────────────────────────────────────────────────
+  openbb-adapter:
+    build:
+      context: ..                                  # monorepo root — acceso a shared/
+      dockerfile: platform/services/openbb-adapter/Dockerfile
+    hostname: openbb-adapter
+    ports:
+      - "8009:8009"
+    env_file: .env
+    environment:
+      KAFKA_SERVERS:              kafka:29092
+      REDIS_URL:                  redis://redis:6379/0
+      OPENBB_DISABLE_TELEMETRY:   "true"
+      CRYPTO_SYMBOLS:             "BTC,ETH,SOL,BNB,XRP"
+      MACRO_POLL_INTERVAL:        "3600"
+      FUNDING_POLL_INTERVAL:      "28800"
+    depends_on:
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [los-ojos-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health').raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Frontend ──────────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      # Vite bakes VITE_* vars into the JS bundle at build time — they must be
+      # passed as build args, not just runtime environment variables.
+      args:
+        VITE_WS_URL:           ws://localhost:8005/ws
+        VITE_API_URL:          http://localhost:8005
+        VITE_ORCHESTRATOR_URL: http://localhost:8007
+        VITE_SEC_URL:          http://localhost:8008
+        VITE_EXECUTION_URL:    http://localhost:8010
+        VITE_OPENBB_URL:       http://localhost:8009
+    ports:
+      - "3000:3000"
+    environment:
+      VITE_WS_URL:              ws://localhost:8005/ws
+      VITE_API_URL:             http://localhost:8005
+      VITE_ORCHESTRATOR_URL:    http://localhost:8007
+      VITE_SEC_URL:             http://localhost:8008
+      VITE_EXECUTION_URL:       http://localhost:8010
+      VITE_OPENBB_URL:          http://localhost:8009
+    depends_on:
+      - realtime-signal
+    networks: [los-ojos-net]
+    restart: unless-stopped
+
+
+  # ============================================================================
+  # MONITORING
+  # ============================================================================
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    networks: [los-ojos-net]
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP:     "false"
+      GF_INSTALL_PLUGINS:         "grafana-clock-panel"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    depends_on: [prometheus]
+    networks: [los-ojos-net]

@@ -1,0 +1,225 @@
+# =============================================================================
+# Kafka topics — canonical registry
+# =============================================================================
+# All topics use the ``los_ojos.*`` prefix.
+# Source of truth: quant_shared.schemas.events.KafkaTopics
+#
+# Apply with:
+#   kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP_SERVERS \
+#     --create --config-file infra/kafka/topics.yml
+# (or use the Makefile target: make kafka-create-topics)
+# =============================================================================
+
+topics:
+
+  # ---------------------------------------------------------------------------
+  # Raw market data
+  # ---------------------------------------------------------------------------
+
+  - name: los_ojos.market.data
+    partitions: 8
+    replication_factor: 3
+    configs:
+      retention.ms: "604800000"      # 7 days
+      compression.type: "lz4"
+
+  - name: los_ojos.market.normalized
+    partitions: 8
+    replication_factor: 3
+    configs:
+      retention.ms: "2592000000"     # 30 days
+      compression.type: "lz4"
+
+  - name: los_ojos.market.orderbook
+    partitions: 8
+    replication_factor: 3
+    configs:
+      retention.ms: "86400000"       # 1 day
+      compression.type: "lz4"
+
+  - name: los_ojos.market.funding
+    partitions: 4
+    replication_factor: 3
+    configs:
+      retention.ms: "604800000"
+      compression.type: "lz4"
+
+  - name: los_ojos.derivatives.events
+    partitions: 4
+    replication_factor: 3
+    configs:
+      retention.ms: "604800000"
+      compression.type: "lz4"
+
+  # ---------------------------------------------------------------------------
+  # Features
+  # ---------------------------------------------------------------------------
+
+  - name: los_ojos.features.vector
+    partitions: 4
+    replication_factor: 3
+    configs:
+      retention.ms: "604800000"      # 7 days
+      compression.type: "lz4"
+
+  - name: los_ojos.ml.feature_vector
+    partitions: 4
+    replication_factor: 3
+    configs:
+      retention.ms: "604800000"
+
+  # ---------------------------------------------------------------------------
+  # Context / regime
+  # ---------------------------------------------------------------------------
+
+  - name: los_ojos.context.regime
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "2592000000"
+
+  - name: los_ojos.context.state
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "2592000000"
+
+  - name: los_ojos.context.anomaly
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "2592000000"
+
+  # ---------------------------------------------------------------------------
+  # Macro
+  # ---------------------------------------------------------------------------
+
+  - name: los_ojos.macro.indicators
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "7776000000"     # 90 days
+
+  - name: los_ojos.macro.regime
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "7776000000"
+
+  - name: los_ojos.macro.recession_alert
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "7776000000"
+
+  - name: los_ojos.macro.series
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "7776000000"
+
+  - name: los_ojos.macro.signal
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "2592000000"
+
+  # ---------------------------------------------------------------------------
+  # On-chain
+  # ---------------------------------------------------------------------------
+
+  - name: los_ojos.onchain.whale_alert
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "2592000000"
+
+  - name: los_ojos.onchain.smart_money
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "2592000000"
+
+  # ---------------------------------------------------------------------------
+  # Signals & execution
+  # ---------------------------------------------------------------------------
+
+  - name: los_ojos.signals.trading
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "7776000000"     # 90 days — audit trail
+
+  # ---------------------------------------------------------------------------
+  # SEC / news
+  # ---------------------------------------------------------------------------
+
+  - name: los_ojos.sec.signal
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "7776000000"
+
+  # ---------------------------------------------------------------------------
+  # Universe & corporate actions
+  # ---------------------------------------------------------------------------
+
+  - name: los_ojos.corporate_actions
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "220752000000"   # 7 years — audit requirement
+
+  - name: los_ojos.universe.updates
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "7776000000"
+
+  # ---------------------------------------------------------------------------
+  # Bot control
+  # ---------------------------------------------------------------------------
+
+  - name: los_ojos.bot.kill_switch
+    partitions: 1
+    replication_factor: 3
+    configs:
+      retention.ms: "7776000000"
+
+  # ---------------------------------------------------------------------------
+  # Drift & retraining  (Semana 8)
+  # ---------------------------------------------------------------------------
+
+  - name: los_ojos.drift.events
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "2592000000"     # 30 days
+      compression.type: "lz4"
+
+  - name: los_ojos.retrain.triggers
+    partitions: 3                    # one per horizon (intraday/swing/daily)
+    replication_factor: 3
+    configs:
+      cleanup.policy: "compact"
+      min.compaction.lag.ms: "3600000"    # 1 hour — prevents premature compaction
+      delete.retention.ms: "86400000"     # 1 day tombstone retention
+      segment.ms: "3600000"
+
+  # ---------------------------------------------------------------------------
+  # Allocator  (Semana 9)
+  # ---------------------------------------------------------------------------
+
+  - name: los_ojos.allocator.updates
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "31536000000"    # 1 year — full audit trail (NOT compact)
+      compression.type: "lz4"
+
+  - name: los_ojos.allocator.decisions
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "7776000000"     # 90 days — audit of every choose() call
+      compression.type: "lz4"

@@ -1,0 +1,12 @@
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
+aiohttp==3.9.5
+aiokafka==0.10.0
+structlog==24.1.0
+vaderSentiment==3.3.2
+# Optional — install manually if GPU available:
+# transformers==4.40.0
+# torch==2.2.0
+# spacy==3.7.4
+cramjam>=2.9.0
