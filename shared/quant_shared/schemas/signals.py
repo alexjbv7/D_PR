@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
-from typing import Optional
 
 
 class SignalDirection(str, Enum):
