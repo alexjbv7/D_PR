@@ -6,6 +6,9 @@ Daily briefing CLI::
 """
 from __future__ import annotations
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import asyncio
 from datetime import date as date_cls
 from pathlib import Path
@@ -62,12 +65,12 @@ async def _main(
     if discord_webhook:
         payload = build_daily_payload(
             date_str=date_str,
-            pnl_realized=str(metrics.get("pnl_realized", "N/A")),
-            pnl_pct=float(metrics.get("pnl_pct", 0.0)),
-            trades_total=int(metrics.get("trades_total", 0)),
-            alerts_count=int(metrics.get("alerts_count", 0)),
-            open_positions_count=int(metrics.get("open_positions_count", 0)),
-            drift_events=int(metrics.get("drift_events", 0)),
+            pnl_realized=str(metrics.pnl_realized),
+            pnl_pct=metrics.pnl_realized_pct,
+            trades_total=metrics.trades_total,
+            alerts_count=len(metrics.alerts_fired),
+            open_positions_count=len(metrics.open_positions),
+            drift_events=metrics.drift_events,
             md_full=md,
         )
         await post_to_discord(discord_webhook, payload)

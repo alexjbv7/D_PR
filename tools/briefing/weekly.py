@@ -6,6 +6,9 @@ Weekly briefing CLI::
 """
 from __future__ import annotations
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import asyncio
 from pathlib import Path
 
@@ -76,10 +79,10 @@ async def _main(
     if discord_webhook:
         payload = build_weekly_payload(
             week_iso=week_iso,
-            weekly_pnl=str(metrics.weekly_pnl),
-            weekly_pnl_pct=float(metrics.weekly_pnl_pct),
-            trades_total=int(metrics.trades_total),
-            win_rate=float(metrics.win_rate),
+            weekly_pnl=str(metrics.pnl_total),
+            weekly_pnl_pct=float(metrics.pnl_total / metrics.equity_start * 100) if metrics.equity_start else 0.0,
+            trades_total=metrics.trades_total,
+            win_rate=metrics.sharpe_rolling_7d,
             sparkline=spark,
             md_full=md,
         )
