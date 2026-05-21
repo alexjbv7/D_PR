@@ -114,6 +114,11 @@ class FeatureStore:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    @property
+    def redis_client(self) -> Optional[aioredis.Redis]:
+        """Async Redis client (available after ``connect()``)."""
+        return self._redis
+
     async def connect(self) -> None:
         self._redis = await aioredis.from_url(
             self._redis_url, decode_responses=True

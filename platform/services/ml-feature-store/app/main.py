@@ -11,6 +11,7 @@ Responsabilidades:
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +20,7 @@ import structlog
 from .feature_store import FeatureStore
 from .feature_streaming import FeatureStreaming
 from .feature_validator import FeatureValidator
+from .drift.startup import prometheus_asgi, start_drift_cron, stop_drift_cron
 
 logger = structlog.get_logger(__name__)
 
@@ -36,12 +38,13 @@ SYMBOLS             = os.getenv("OHLCV_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").spli
 feature_store:    FeatureStore | None = None
 feature_stream:   FeatureStreaming | None = None
 feature_validator: FeatureValidator | None = None
+_drift_cron:      object | None = None
 _bg_tasks:        list[asyncio.Task] = []
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global feature_store, feature_stream, feature_validator
+    global feature_store, feature_stream, feature_validator, _drift_cron
 
     logger.info("ml-feature-store.startup")
 
@@ -66,8 +69,20 @@ async def lifespan(app: FastAPI):
     _bg_tasks.append(asyncio.create_task(feature_stream.run(), name="feature-streaming"))
     _bg_tasks.append(asyncio.create_task(_store_sync_loop(), name="store-sync"))
 
+    _drift_cron = await start_drift_cron(
+        redis=feature_store.redis_client,
+        postgres_dsn=POSTGRES_DSN,
+        kafka_servers=KAFKA_SERVERS,
+    )
+    if _drift_cron is not None:
+        _bg_tasks.append(
+            asyncio.create_task(_drift_cron.run_loop(), name="drift-cron"),
+        )
+
     logger.info("ml-feature-store.ready")
     yield
+
+    await stop_drift_cron()
 
     for task in _bg_tasks:
         task.cancel()
@@ -98,7 +113,12 @@ async def _store_sync_loop():
                     "price": list(closes)[-1],
                 })
                 if fv:
-                    await feature_store.update(symbol, fv.to_dict(), fv.ts)
+                    ts = fv.ts
+                    if isinstance(ts, str):
+                        ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    elif ts is None:
+                        ts = datetime.now(timezone.utc)
+                    await feature_store.update(symbol, fv.to_dict(), ts)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -122,15 +142,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.mount("/metrics", prometheus_asgi())
+
 
 @app.get("/health", tags=["ops"])
 async def health():
     symbols_live = [s for s in SYMBOLS if s in (feature_stream._closes if feature_stream else {})]
     return {
-        "status":       "ok",
-        "service":      "ml-feature-store",
-        "symbols_live": symbols_live,
+        "status":        "ok",
+        "service":       "ml-feature-store",
+        "symbols_live":  symbols_live,
         "symbols_total": len(SYMBOLS),
+        "drift_cron":    _drift_cron is not None,
     }
 
 

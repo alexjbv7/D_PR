@@ -1,0 +1,52 @@
+# Scheduled US macro events — 2026 calendar
+# Used by MacroEventFilter (ml-feature-store drift cron).
+# Update annually; inject one-off events via MacroEventFilter(extra_events=...).
+#
+# Fields:
+#   date  : ISO date (YYYY-MM-DD)
+#   label : FOMC | NFP | CPI | GDP
+
+events:
+  # ---- FOMC (8) ----
+  - { date: "2026-01-28", label: FOMC }
+  - { date: "2026-03-18", label: FOMC }
+  - { date: "2026-05-06", label: FOMC }
+  - { date: "2026-06-17", label: FOMC }
+  - { date: "2026-07-29", label: FOMC }
+  - { date: "2026-09-16", label: FOMC }
+  - { date: "2026-10-28", label: FOMC }
+  - { date: "2026-12-09", label: FOMC }
+
+  # ---- NFP — first Friday (12) ----
+  - { date: "2026-01-09", label: NFP }
+  - { date: "2026-02-06", label: NFP }
+  - { date: "2026-03-06", label: NFP }
+  - { date: "2026-04-03", label: NFP }
+  - { date: "2026-05-08", label: NFP }
+  - { date: "2026-06-05", label: NFP }
+  - { date: "2026-07-02", label: NFP }
+  - { date: "2026-08-07", label: NFP }
+  - { date: "2026-09-04", label: NFP }
+  - { date: "2026-10-02", label: NFP }
+  - { date: "2026-11-06", label: NFP }
+  - { date: "2026-12-04", label: NFP }
+
+  # ---- CPI — mid-month releases (12) ----
+  - { date: "2026-01-14", label: CPI }
+  - { date: "2026-02-11", label: CPI }
+  - { date: "2026-03-11", label: CPI }
+  - { date: "2026-04-10", label: CPI }
+  - { date: "2026-05-13", label: CPI }
+  - { date: "2026-06-10", label: CPI }
+  - { date: "2026-07-14", label: CPI }
+  - { date: "2026-08-12", label: CPI }
+  - { date: "2026-09-10", label: CPI }
+  - { date: "2026-10-14", label: CPI }
+  - { date: "2026-11-12", label: CPI }
+  - { date: "2026-12-10", label: CPI }
+
+  # ---- GDP advance / preliminary (4) ----
+  - { date: "2026-01-29", label: GDP }
+  - { date: "2026-04-29", label: GDP }
+  - { date: "2026-07-29", label: GDP }
+  - { date: "2026-10-29", label: GDP }

@@ -45,6 +45,12 @@ import structlog
 from .drift_repository  import DriftRepository
 from .macro_event_filter import MacroEventFilter
 from .alert_emitter     import AlertEmitter
+from .metrics import (
+    drift_ece_value,
+    drift_events_total,
+    drift_psi_value,
+    drift_retrain_triggers_total,
+)
 from ._math import compute_psi, severity_label, compute_ece, compute_brier
 
 logger = structlog.get_logger(__name__)
@@ -202,11 +208,21 @@ class DriftCron:
             psi_results[feat]  = psi
             severity_map[feat] = sev
 
+            drift_psi_value.labels(horizon=horizon, feature=feat).set(psi)
+
+            macro_supp = (
+                sev == "severe" and self._mac_filter.is_suppressed(now)
+            )
+
             # Persist
             await self._repo.insert_psi(
                 ts=now, horizon=horizon, model_version=model_version,
                 feature_name=feat, psi=psi, severity=sev,
+                macro_suppressed=macro_supp,
             )
+
+            if sev in ("moderate", "severe"):
+                drift_events_total.labels(horizon=horizon, severity=sev).inc()
 
             # Alert if moderate or severe
             if psi >= PSI_ALERT_THRESHOLD:
@@ -233,6 +249,7 @@ class DriftCron:
             labels_arr = np.array([r["true_label"] for r in rows], dtype=int)
             ece_val   = compute_ece(probas_arr, labels_arr)
             brier_val = compute_brier(probas_arr, labels_arr)
+            drift_ece_value.labels(horizon=horizon).set(ece_val)
 
             await self._repo.insert_ece(
                 ts=now, horizon=horizon, model_version=model_version,
@@ -273,6 +290,14 @@ class DriftCron:
                 horizon=horizon, model_version=model_version,
                 trigger_reason=reason, psi_max=max_psi, ece=ece_val,
                 suppressed=suppressed, suppression_reason=suppression_reason,
+            )
+            drift_retrain_triggers_total.labels(
+                horizon=horizon, suppressed=str(suppressed).lower(),
+            ).inc()
+            await self._repo.insert_retrain(
+                ts=now, horizon=horizon, model_version=model_version,
+                trigger_reason=reason, suppressed=suppressed,
+                psi_max=max_psi, ece=ece_val,
             )
 
         return {
@@ -341,3 +366,25 @@ class DriftCron:
             logger.warning("drift_cron.edges_save.error", feature=feature_name, error=str(exc))
 
         return edges
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Drift cron dry-run")
+    parser.add_argument("--once", action="store_true", help="Run one pipeline pass")
+    parser.add_argument(
+        "--as-of",
+        type=str,
+        default=None,
+        help="ISO timestamp for manual run (UTC)",
+    )
+    args = parser.parse_args()
+
+    async def _main() -> None:
+        if not args.once:
+            parser.error("Use --once for a single dry-run pass")
+        logger.info("drift_cron.cli.once", as_of=args.as_of)
+        print("drift_cron CLI requires POSTGRES_DSN + REDIS_URL + Kafka in env")
+
+    asyncio.run(_main())
