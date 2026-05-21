@@ -63,6 +63,12 @@ clean-volumes:  ## Remove data volumes only
 db-shell:  ## Open psql shell
 	docker-compose exec postgres psql -U trading -d trading_db
 
+ops-test:  ## Run tools/ briefing + smoke unit tests (from repo root)
+	cd .. && python -m pytest tools/briefing/tests tools/smoke/test_post_deploy_smoke.py -q
+
+ops-smoke:  ## Post-deploy smoke (requires make up + db-migrate)
+	cd .. && python -m pytest tools/smoke/test_post_deploy_smoke.py -xvs
+
 db-migrate:  ## Apply SQL migrations (platform/infra/sql/migrations/*.sql in order)
 	@echo "Applying migrations from infra/sql/migrations/ ..."
 	@for f in $$(ls infra/sql/migrations/*.sql 2>/dev/null | sort); do \

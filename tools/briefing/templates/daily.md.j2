@@ -1,0 +1,48 @@
+# Daily Briefing — {{ metrics.date_et }}
+
+## P&L
+- Equity inicio: ${{ "%.2f"|format(metrics.equity_start) }}
+- Equity fin:    ${{ "%.2f"|format(metrics.equity_end) }}
+- Realizado:     ${{ "%.2f"|format(metrics.pnl_realized) }} ({{ "%.2f%%"|format(metrics.pnl_realized_pct) }})
+- No realizado:  ${{ "%.2f"|format(metrics.pnl_unrealized) }}
+
+## Operación
+- Trades totales: {{ metrics.trades_total }}
+{% for horizon, count in metrics.trades_by_horizon.items() %}
+  - {{ horizon }}: {{ count }}
+{% endfor %}
+- Win rate: {{ "%.1f%%"|format(metrics.win_rate * 100) }}
+- Avg Kelly usado: {{ "%.3f"|format(metrics.avg_kelly_used) }}
+
+## Salud sistema
+- Alpaca latency p99: {{ "%.1f"|format(metrics.alpaca_latency_p99_ms) }} ms
+- Reconciler discrepancies: {{ metrics.reconciler_discrepancies }}
+- Drift events: {{ metrics.drift_events }}
+- PDT warnings: {{ metrics.pdt_warnings }}
+
+## Alertas disparadas
+{% if metrics.alerts_fired %}
+{% for alert in metrics.alerts_fired %}
+- [{{ alert.severity }}] {{ alert.id }}: {{ alert.message }}
+{% endfor %}
+{% else %}
+Ninguna.
+{% endif %}
+
+## Posiciones abiertas
+{% if metrics.open_positions %}
+| Symbol | Side | Qty | Avg Entry | Current | P&L |
+|---|---|---|---|---|---|
+{% for pos in metrics.open_positions %}
+| {{ pos.symbol }} | {{ pos.side }} | {{ pos.qty }} | ${{ pos.avg_entry }} | ${{ pos.current_price if pos.current_price is not none else "—" }} | ${{ pos.unrealized_pnl if pos.unrealized_pnl is not none else "—" }} |
+{% endfor %}
+{% else %}
+Flat.
+{% endif %}
+
+## Próximos eventos (next 24h ET)
+- Macro: {{ metrics.next_macro_events_et | join(", ") if metrics.next_macro_events_et else "ninguno" }}
+- Earnings en universo activo: {{ metrics.next_earnings_count }}
+
+---
+*Generado automáticamente por tools/briefing/daily.py @ {{ metrics.generated_at_utc }}.*

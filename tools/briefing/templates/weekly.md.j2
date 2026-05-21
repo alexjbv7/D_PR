@@ -1,0 +1,85 @@
+# Weekly Briefing — {{ metrics.week_iso }}
+
+**Periodo ET:** {{ metrics.start_date_et }} → {{ metrics.end_date_et }}
+
+## Cumulative P&L
+- Equity inicio: ${{ "%.2f"|format(metrics.equity_start) }}
+- Equity fin:    ${{ "%.2f"|format(metrics.equity_end) }}
+- P&L total:     ${{ "%.2f"|format(metrics.pnl_total) }}
+
+{% if metrics.daily_pnl_series %}
+```
+{{ pnl_sparkline }}
+```
+{% endif %}
+
+## Risk metrics
+- Sharpe rolling 7d: {{ "%.2f"|format(metrics.sharpe_rolling_7d) }}
+- Sharpe rolling 30d: {{ metrics.sharpe_rolling_30d if metrics.sharpe_rolling_30d is not none else "n/a (< 30d history)" }}
+- Max drawdown: {{ "%.2f%%"|format(metrics.max_drawdown_pct) }}
+
+## Operación
+- Trades totales: {{ metrics.trades_total }}
+{% for horizon, pnl in metrics.pnl_by_horizon.items() %}
+  - {{ horizon }} P&L: ${{ "%.2f"|format(pnl) }}
+{% endfor %}
+
+## Top 5 winners
+{% if metrics.top_5_winners %}
+{% for t in metrics.top_5_winners %}
+- {{ t.symbol }}: ${{ "%.2f"|format(t.pnl|float) }} ({{ t.reason or "—" }})
+{% endfor %}
+{% else %}
+Ninguno.
+{% endif %}
+
+## Top 5 losers
+{% if metrics.top_5_losers %}
+{% for t in metrics.top_5_losers %}
+- {{ t.symbol }}: ${{ "%.2f"|format(t.pnl|float) }} ({{ t.reason or "—" }})
+{% endfor %}
+{% else %}
+Ninguno.
+{% endif %}
+
+## Drift events (by feature, top 20)
+{% if metrics.drift_events_by_feature %}
+{% for feat, cnt in metrics.drift_events_by_feature.items() %}
+- {{ feat }}: {{ cnt }}
+{% endfor %}
+{% else %}
+Ninguno.
+{% endif %}
+
+## Alerts by severity
+{% for sev, cnt in metrics.alerts_by_severity.items() %}
+- {{ sev }}: {{ cnt }}
+{% endfor %}
+
+## Allocator posterior snapshot
+| Horizon | α | β | mean |
+|---|---|---|---|
+{% for horizon, snap in metrics.allocator_snapshot.items() %}
+| {{ horizon }} | {{ "%.1f"|format(snap.alpha) }} | {{ "%.1f"|format(snap.beta) }} | {{ "%.3f"|format(snap.mean) }} |
+{% endfor %}
+
+## Decisiones para revisar (low Thompson sample)
+{% if metrics.allocator_decisions_low_sample %}
+{% for d in metrics.allocator_decisions_low_sample %}
+- {{ d.symbol }} {{ d.horizon }}: sample={{ d.sample }} (< median)
+{% endfor %}
+{% else %}
+Ninguna.
+{% endif %}
+
+## Auto-detected TODOs
+{% if metrics.auto_detected_todos %}
+{% for todo in metrics.auto_detected_todos %}
+- [ ] {{ todo }}
+{% endfor %}
+{% else %}
+Ninguno.
+{% endif %}
+
+---
+*Generado automáticamente por tools/briefing/weekly.py @ {{ metrics.generated_at_utc }}.*
