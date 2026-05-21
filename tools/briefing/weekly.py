@@ -2,6 +2,7 @@
 Weekly briefing CLI::
 
     python -m tools.briefing.weekly --week 2026-W20
+    python -m tools.briefing.weekly --week 2026-W20 --discord-webhook $DISCORD_WEBHOOK_URL
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ from pathlib import Path
 import click
 import httpx
 
+from .discord_formatter import build_weekly_payload, post_to_discord
 from .metrics_collector import MetricsCollector
 from .renderer import render_template
 from .slack_formatter import md_to_slack_mrkdwn
@@ -38,15 +40,17 @@ def _sparkline(values: list[float]) -> str:
 @click.option("--week", "week_iso", required=True, help="ISO week e.g. 2026-W20")
 @click.option("--output-dir", default=str(_DEFAULT_OUTPUT), show_default=True)
 @click.option("--slack-webhook", envvar="SLACK_WEBHOOK", default=None)
-def main(week_iso: str, output_dir: str, slack_webhook: str | None) -> None:
-    """Generate weekly aggregated briefing markdown."""
-    asyncio.run(_main(week_iso, output_dir, slack_webhook))
+@click.option("--discord-webhook", envvar="DISCORD_WEBHOOK_URL", default=None)
+def main(week_iso: str, output_dir: str, slack_webhook: str | None, discord_webhook: str | None) -> None:
+    """Generate weekly aggregated briefing markdown; optionally post to Slack and/or Discord."""
+    asyncio.run(_main(week_iso, output_dir, slack_webhook, discord_webhook))
 
 
 async def _main(
     week_iso: str,
     output_dir: str,
     slack_webhook: str | None,
+    discord_webhook: str | None,
 ) -> None:
     collector = await _build_collector()
     metrics = await collector.collect_weekly(week_iso)
@@ -68,6 +72,19 @@ async def _main(
             )
             response.raise_for_status()
         click.echo("Sent to Slack")
+
+    if discord_webhook:
+        payload = build_weekly_payload(
+            week_iso=week_iso,
+            weekly_pnl=str(metrics.weekly_pnl),
+            weekly_pnl_pct=float(metrics.weekly_pnl_pct),
+            trades_total=int(metrics.trades_total),
+            win_rate=float(metrics.win_rate),
+            sparkline=spark,
+            md_full=md,
+        )
+        await post_to_discord(discord_webhook, payload)
+        click.echo("Sent to Discord")
 
 
 async def _build_collector() -> MetricsCollector:
