@@ -16,6 +16,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import make_asgi_app
 from pydantic import BaseModel, Field
 import structlog
 
@@ -320,6 +321,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.mount("/metrics", make_asgi_app())
 
 
 # ---------------------------------------------------------------------------
