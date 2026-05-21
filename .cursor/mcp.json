@@ -1,0 +1,13 @@
+{
+    "mcpServers": {
+      "discord": {
+        "command": "python",
+        "args": ["-m", "tools.mcp.discord_mcp"],
+        "cwd": "C:\\Users\\alexj\\OneDrive\\Desktop\\quant_bot",
+        "env": {
+          "DISCORD_BOT_TOKEN": "${DISCORD_BOT_TOKEN}",
+          "DISCORD_GUILD_ID": "${DISCORD_GUILD_ID}"
+        }
+      }
+    }
+  }

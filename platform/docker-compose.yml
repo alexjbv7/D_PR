@@ -417,3 +417,19 @@ services:
       - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
     depends_on: [prometheus]
     networks: [los-ojos-net]
+
+  # -- Briefing Scheduler -----------------------------------------------------
+  briefing-scheduler:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ..:/app
+    environment:
+      - DISCORD_WEBHOOK_URL=
+      - POSTGRES_DSN=
+      - PROMETHEUS_URL=
+    command: >
+      sh -c "pip install apscheduler httpx tenacity click python-dotenv --quiet &&
+             python -m tools.briefing.scheduler"
+    networks: [los-ojos-net]
+    restart: unless-stopped

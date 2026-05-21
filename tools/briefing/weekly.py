@@ -77,14 +77,20 @@ async def _main(
         click.echo("Sent to Slack")
 
     if discord_webhook:
+        pnl_pct = (
+            float(metrics.pnl_total / metrics.equity_start * 100)
+            if metrics.equity_start
+            else 0.0
+        )
         payload = build_weekly_payload(
             week_iso=week_iso,
             weekly_pnl=str(metrics.pnl_total),
-            weekly_pnl_pct=float(metrics.pnl_total / metrics.equity_start * 100) if metrics.equity_start else 0.0,
+            weekly_pnl_pct=pnl_pct,
             trades_total=metrics.trades_total,
-            win_rate=metrics.sharpe_rolling_7d,
+            sharpe_7d=metrics.sharpe_rolling_7d,
             sparkline=spark,
             md_full=md,
+            max_dd_pct=metrics.max_drawdown_pct,
         )
         await post_to_discord(discord_webhook, payload)
         click.echo("Sent to Discord")
