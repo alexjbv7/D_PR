@@ -1,11 +1,6 @@
 {
-  "__inputs": [],
-  "__requires": [
-    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0" },
-    { "type": "datasource", "id": "postgres", "name": "PostgreSQL", "version": "1.0.0" }
-  ],
   "annotations": { "list": [] },
-  "description": "Drift Detection & Retraining Monitoring — Semana 8",
+  "description": "Drift Detection & ECE Monitoring — Semana 8 (PSI, ECE, retrain triggers)",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -14,46 +9,60 @@
   "panels": [
     {
       "datasource": { "type": "postgres", "uid": "${DS_TIMESCALEDB}" },
-      "description": "Latest PSI per feature, per horizon. Red = severe (≥0.25), yellow = moderate (≥0.10).",
+      "description": "PSI per feature × day (last 30d). Yellow ≥0.10, red ≥0.25.",
       "fieldConfig": {
         "defaults": {
-          "custom": { "align": "auto" },
+          "custom": { "hideFrom": { "tooltip": false, "viz": false, "legend": false } },
           "thresholds": {
             "mode": "absolute",
             "steps": [
               { "color": "green", "value": null },
               { "color": "yellow", "value": 0.1 },
-              { "color": "red",    "value": 0.25 }
+              { "color": "red", "value": 0.25 }
             ]
-          },
-          "displayName": "${__field.labels.feature_name}",
-          "color": { "mode": "thresholds" }
+          }
         },
         "overrides": []
       },
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 0 },
       "id": 1,
       "options": {
-        "cellHeight": "sm",
-        "footer": { "show": false },
-        "showHeader": true
+        "calculate": false,
+        "cellGap": 1,
+        "color": { "exponent": 0.5, "fill": "dark-orange", "mode": "scheme", "scheme": "RdYlGn", "reverse": true },
+        "exemplars": { "color": "rgba(255,0,255,0.7)" },
+        "filterValues": { "le": 1e-9 },
+        "legend": { "show": true },
+        "rowsFrame": { "layout": "auto" },
+        "tooltip": { "show": true, "yHistogram": false },
+        "yAxis": { "axisPlacement": "left", "reverse": false }
       },
       "pluginVersion": "10.0.0",
       "targets": [
         {
           "datasource": { "type": "postgres", "uid": "${DS_TIMESCALEDB}" },
+          "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  horizon,\n  feature_name,\n  ROUND(psi::numeric, 4) AS psi,\n  severity,\n  ts\nFROM drift.psi_history\nWHERE ts >= NOW() - INTERVAL '2 days'\nORDER BY psi DESC\nLIMIT 60;",
-          "refId": "A",
-          "format": "table"
+          "rawSql": "SELECT\n  time_bucket('1 day', ts) AS time,\n  feature_name,\n  MAX(psi) AS psi\nFROM drift.psi_history\nWHERE ts >= NOW() - INTERVAL '30 days'\n  AND horizon = '$horizon'\nGROUP BY 1, 2\nORDER BY 1;",
+          "refId": "A"
         }
       ],
-      "title": "PSI Heatmap — Latest Readings",
-      "type": "table"
+      "title": "PSI Heatmap — per feature (30d)",
+      "transformations": [
+        {
+          "id": "rowsToFields",
+          "options": { "mappings": [] }
+        },
+        {
+          "id": "prepareTimeSeries",
+          "options": { "format": "wide" }
+        }
+      ],
+      "type": "heatmap"
     },
     {
-      "datasource": { "type": "postgres", "uid": "${DS_TIMESCALEDB}" },
-      "description": "Rolling ECE per horizon over the last 30 days. Dashed line at 0.05 threshold.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Rolling ECE per horizon. Dashed threshold at 0.05.",
       "fieldConfig": {
         "defaults": {
           "custom": { "lineWidth": 2, "spanNulls": false },
@@ -62,13 +71,16 @@
             "mode": "absolute",
             "steps": [
               { "color": "green", "value": null },
-              { "color": "red",   "value": 0.05 }
+              { "color": "red", "value": 0.05 }
             ]
-          }
+          },
+          "unit": "none",
+          "max": 0.2,
+          "min": 0
         },
         "overrides": []
       },
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 0 },
       "id": 2,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom" },
@@ -76,27 +88,35 @@
       },
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "${DS_TIMESCALEDB}" },
-          "rawQuery": true,
-          "rawSql": "SELECT\n  time_bucket('1 day', ts) AS time,\n  horizon,\n  AVG(ece) AS ece\nFROM drift.ece_history\nWHERE ts >= NOW() - INTERVAL '30 days'\nGROUP BY 1, 2\nORDER BY 1;",
-          "refId": "A",
-          "format": "time_series"
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "drift_ece_value",
+          "legendFormat": "{{horizon}}",
+          "refId": "A"
         }
       ],
-      "title": "ECE Timeline (rolling 30 days)",
+      "title": "ECE Rolling (Prometheus gauge)",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "postgres", "uid": "${DS_TIMESCALEDB}" },
-      "description": "Count of drift events per day, colour-coded by severity.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Drift events by severity (rate per day).",
       "fieldConfig": {
         "defaults": {
-          "custom": { "lineWidth": 1, "fillOpacity": 20 },
+          "custom": { "fillOpacity": 80, "stacking": { "mode": "normal", "group": "A" } },
           "color": { "mode": "palette-classic" }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "moderate" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "severe" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          }
+        ]
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
       "id": 3,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom" },
@@ -104,36 +124,35 @@
       },
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "${DS_TIMESCALEDB}" },
-          "rawQuery": true,
-          "rawSql": "SELECT\n  time_bucket('1 day', ts) AS time,\n  severity,\n  COUNT(*) AS event_count\nFROM drift.psi_history\nWHERE ts >= NOW() - INTERVAL '30 days'\n  AND severity != 'stable'\nGROUP BY 1, 2\nORDER BY 1;",
-          "refId": "A",
-          "format": "time_series"
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (severity) (increase(drift_events_total{horizon=\"$horizon\"}[1d]))",
+          "legendFormat": "{{severity}}",
+          "refId": "A"
         }
       ],
-      "title": "Drift Events per Day (non-stable PSI)",
+      "title": "Drift Events / day (moderate vs severe)",
       "type": "barchart"
     },
     {
       "datasource": { "type": "postgres", "uid": "${DS_TIMESCALEDB}" },
-      "description": "Count of suppressed vs triggered retrain events per day.",
+      "description": "Retrain triggers vs macro-suppressed (from drift.retrain_history).",
       "fieldConfig": {
         "defaults": {
-          "custom": { "lineWidth": 2 },
+          "custom": { "lineWidth": 2, "fillOpacity": 15 },
           "color": { "mode": "palette-classic" }
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "suppressed" },
-            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
-          },
-          {
             "matcher": { "id": "byName", "options": "triggered" },
             "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "suppressed" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
           }
         ]
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
       "id": 4,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom" },
@@ -142,10 +161,10 @@
       "targets": [
         {
           "datasource": { "type": "postgres", "uid": "${DS_TIMESCALEDB}" },
+          "format": "time_series",
           "rawQuery": true,
-          "rawSql": "-- Proxy: count DriftDetected events from psi_history as triggered / suppressed\n-- (real table would be audit.retrain_triggers; this is a monitoring approximation)\nSELECT\n  time_bucket('1 day', ts) AS time,\n  SUM(CASE WHEN severity = 'severe' THEN 1 ELSE 0 END) AS triggered,\n  0 AS suppressed\nFROM drift.psi_history\nWHERE ts >= NOW() - INTERVAL '30 days'\nGROUP BY 1\nORDER BY 1;",
-          "refId": "A",
-          "format": "time_series"
+          "rawSql": "SELECT\n  time_bucket('1 day', ts) AS time,\n  SUM(CASE WHEN suppressed THEN 1 ELSE 0 END) AS suppressed,\n  SUM(CASE WHEN NOT suppressed THEN 1 ELSE 0 END) AS triggered\nFROM drift.retrain_history\nWHERE ts >= NOW() - INTERVAL '30 days'\n  AND horizon = '$horizon'\nGROUP BY 1\nORDER BY 1;",
+          "refId": "A"
         }
       ],
       "title": "Retrain Triggers vs Macro Suppressions",
@@ -158,22 +177,47 @@
   "templating": {
     "list": [
       {
+        "current": { "text": "prometheus", "value": "prometheus" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus",
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      },
+      {
         "current": {},
         "hide": 0,
         "includeAll": false,
+        "label": "TimescaleDB",
         "name": "DS_TIMESCALEDB",
         "options": [],
         "query": "postgres",
         "refresh": 1,
-        "type": "datasource",
-        "label": "TimescaleDB"
+        "type": "datasource"
+      },
+      {
+        "current": { "text": "swing", "value": "swing" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Horizon",
+        "name": "horizon",
+        "options": [
+          { "text": "intraday", "value": "intraday" },
+          { "text": "swing", "value": "swing" },
+          { "text": "daily", "value": "daily" }
+        ],
+        "query": "intraday,swing,daily",
+        "type": "custom"
       }
     ]
   },
-  "time": { "from": "now-7d", "to": "now" },
+  "time": { "from": "now-30d", "to": "now" },
   "timepicker": {},
   "timezone": "utc",
   "title": "Drift Monitor — S8",
   "uid": "drift-monitor-s8",
-  "version": 1
+  "version": 2
 }

@@ -136,11 +136,18 @@ SELECT create_hypertable(
     if_not_exists => TRUE
 );
 
-SELECT add_compression_policy(
-    'market.bars_1m_adjusted',
-    INTERVAL '7 days',
-    if_not_exists => TRUE
-);
+DO $$
+BEGIN
+    BEGIN
+        PERFORM add_compression_policy(
+            'market.bars_1m_adjusted',
+            INTERVAL '7 days',
+            if_not_exists => TRUE
+        );
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'Skipping compression policy for market.bars_1m_adjusted: %', SQLERRM;
+    END;
+END $$;
 
 -- ---------------------------------------------------------------------------
 -- 6. Kafka topics (comment-only — applied via infra/kafka/topics.yml)

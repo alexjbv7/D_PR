@@ -77,21 +77,14 @@ scrape_configs:
         labels:
           service: 'strategy-orchestrator'
 
-  # ── Infrastructure ───────────────────────────────────────────────────────
-  - job_name: 'kafka'
+  - job_name: 'execution-engine'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
     static_configs:
-      - targets: ['kafka:9101']
+      - targets: ['execution-engine:8000']
         labels:
-          service: 'kafka'
+          service: 'execution-engine'
 
-  - job_name: 'redis'
-    static_configs:
-      - targets: ['redis:9121']
-        labels:
-          service: 'redis'
-
-  - job_name: 'postgres'
-    static_configs:
-      - targets: ['postgres:9187']
-        labels:
-          service: 'postgres'
+  # Infra exporters (kafka:9101, redis:9121, postgres:9187) are not part of
+  # the local compose stack yet. Add them here when exporter containers are
+  # introduced; otherwise Prometheus correctly reports them as down.

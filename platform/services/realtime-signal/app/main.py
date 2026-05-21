@@ -31,6 +31,7 @@ from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import make_asgi_app
 
 from libs.shared.events import (
     FinalSignalEvent, WhaleAlertEvent, MacroDataEvent,
@@ -233,6 +234,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.mount("/metrics", make_asgi_app())
 
 
 # ===========================================================================

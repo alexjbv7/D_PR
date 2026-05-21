@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import make_asgi_app
 import structlog
 
 from .normalizer import DataNormalizer
@@ -221,6 +222,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.mount("/metrics", make_asgi_app())
 
 
 # ---------------------------------------------------------------------------

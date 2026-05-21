@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException
+from prometheus_client import make_asgi_app
 
 from .brokers import (
     AlpacaAdapter,
@@ -335,6 +336,8 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+app.mount("/metrics", make_asgi_app())
 
 
 def _state(app: FastAPI = Depends()) -> AppState:                    # noqa: B008
