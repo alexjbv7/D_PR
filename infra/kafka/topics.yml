@@ -223,3 +223,14 @@ topics:
     configs:
       retention.ms: "7776000000"     # 90 days — audit of every choose() call
       compression.type: "lz4"
+
+  # ---------------------------------------------------------------------------
+  # Execution results  (Semana 5+)
+  # ---------------------------------------------------------------------------
+
+  - name: los_ojos.execution.result
+    partitions: 2
+    replication_factor: 3
+    configs:
+      retention.ms: "7776000000"     # 90 days — audit trail
+      compression.type: "lz4"

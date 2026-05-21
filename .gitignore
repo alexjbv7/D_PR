@@ -75,5 +75,8 @@ platform/frontend/.vite/
 *.log
 logs/
 
+# Ops briefing output (generated markdown)
+tools/briefing/output/
+
 # Imágenes generadas (plots van en research/plots/ solo localmente)
 research/plots/*.png
