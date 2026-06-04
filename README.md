@@ -1,12 +1,24 @@
 # quant_bot — Monorepo de Trading Algorítmico ML
 
-Sistema institucional de trading basado en Machine Learning, diseñado siguiendo las
-prácticas de López de Prado (*Advances in Financial Machine Learning*) con
-estándares de validación estadística de hedge funds quant.
+Sistema institucional de trading algorítmico construido sobre Machine Learning,
+siguiendo las prácticas de López de Prado (*Advances in Financial Machine Learning*)
+y operando en **paper trading sobre Alpaca** (run activo: 2026-05-20 → 2026-06-19).
 
-> **Documento maestro de arquitectura**: [`CLAUDE.md`](CLAUDE.md).
-> Este README es una guía de arranque rápido; para decisiones de diseño,
-> ADRs y roadmap consulta `CLAUDE.md`.
+> **Documento maestro**: [`CLAUDE.md`](CLAUDE.md) — arquitectura, ADRs, roadmap y reglas para agentes IA.  
+> **Runbook de operación**: [`docs/runbooks/paper_trading_ops.md`](docs/runbooks/paper_trading_ops.md)
+
+---
+
+## Estado del sistema
+
+| Componente | Estado | Notas |
+|------------|--------|-------|
+| Paper trading (Alpaca) | 🟢 Activo | Run 30d, $100k inicial |
+| Execution engine | 🟢 Operativo | Circuit breaker + kill switch |
+| Nightly retrain DAG | 🟢 Configurado | dry-run diario, gates DSR/ECE |
+| Observabilidad | 🟢 Activo | Prometheus + Grafana + 5 alert rules |
+| Multi-horizon ML | 🟡 Staging | intraday/swing/daily, esperando datos reales |
+| Live trading | ⚪ No iniciado | Requiere 30d paper sin P0 + aprobación humana |
 
 ---
 
@@ -15,43 +27,59 @@ estándares de validación estadística de hedge funds quant.
 ```
 quant_bot/
 │
-├── research/              Núcleo ML: modelos, backtesting, validación, features
-│   ├── models/            WalkForwardRunner, zoo, calibration, meta_labeler,
-│   │                      entry_filter, feature_selection, hyperopt, rl_agent
-│   ├── features/          engineering, regime_gmm, pca_denoiser, volatility_target,
-│   │                      labeling (triple-barrier, ATR)
-│   ├── backtesting/       engine (bar-level, fees/slippage), multi_asset_engine
-│   ├── risk/              kelly, dynamic_rr, bayesian_sizer, sizing_multi_asset
-│   ├── metrics/           objective (DSR/PSR/constraints), advanced
-│   ├── reporting/         report, FoldReport, compare_is_oos
-│   ├── instruments/       catalog, specs (ForexSpec, FutureSpec)
-│   ├── dashboard/         Streamlit app (app.py, pages/, components/)
-│   ├── examples/          pipeline_ml_real_data.py, validation_demo*.py,
-│   │                      pipeline_hyperopt.py
-│   └── tests/             test_walk_forward_runner, test_calibration,
-│                          test_meta_labeler, test_deep_learning, test_no_leakage…
+├── research/                   Núcleo ML: modelos, backtesting, validación
+│   ├── models/
+│   │   ├── zoo.py              LogReg, XGBoost, ResMLP, LSTM
+│   │   ├── walk_forward_runner.py
+│   │   ├── calibration.py      IsotonicCalibrator + TemperatureScaling
+│   │   ├── meta_labeler.py
+│   │   ├── multi_horizon/      trainer, horizon_config, registry_adapter
+│   │   └── drift/              PSI, ECE, KS-test, macro event filter
+│   ├── pipelines/
+│   │   └── nightly_retrain.py  DAG nocturno (S11) — gates DSR/ECE/collapse
+│   ├── cli/
+│   │   ├── train_multi_horizon.py
+│   │   └── run_nightly_retrain.py
+│   ├── features/               engineering, regime_gmm, pca_denoiser, labeling
+│   ├── risk/                   kelly, dynamic_rr, bayesian_sizer
+│   ├── backtesting/            engine bar-level, multi_asset_engine
+│   └── tests/                  anti-leakage, walk-forward, calibración, drift
 │
-├── platform/              Plataforma event-driven en producción (Los Ojos)
+├── platform/                   Microservicios event-driven (Kafka + Redis)
 │   ├── services/
-│   │   ├── market-intelligence/   OpenBB + Binance orderbook + funding rate
-│   │   ├── macroeconomic/         FRED + Sahm Rule + yield curve + macro regime
-│   │   ├── onchain-analysis/      Whale detection + smart money flow
-│   │   ├── context-engine/        GMM regime classifier (5 componentes)
-│   │   ├── realtime-signal/       FastAPI WebSocket (Kafka → Redis → WS)
-│   │   ├── ml-feature-store/      Feature computation + serving
-│   │   ├── strategy-orchestrator/ Bot config, kill switch, señal generation
-│   │   └── sec-research/          SEC filings, NLP, sentiment
-│   ├── libs/shared/       Kafka client, Redis client, Postgres pool,
-│   │                      eventos Pydantic (fuente de verdad de contratos Kafka)
-│   ├── frontend/          React + TypeScript + Vite + Tailwind
-│   └── Makefile           make up / infra / services / monitoring / frontend
+│   │   ├── execution-engine/   AlpacaAdapter + RiskGate + Reconciler
+│   │   │   ├── app/brokers/_alpaca/
+│   │   │   │   ├── circuit_breaker.py   ← CLOSED→OPEN→HALF_OPEN
+│   │   │   │   ├── retry.py
+│   │   │   │   └── rate_limiter.py
+│   │   │   ├── app/risk_gate.py         ← kill switch step-0
+│   │   │   └── app/reconciler.py        ← 60s loop + kill switch
+│   │   ├── market-intelligence/  OpenBB + Binance WS
+│   │   ├── macroeconomic/        FRED + Sahm Rule + yield curve
+│   │   ├── onchain-analysis/     Whale detection + smart money
+│   │   ├── context-engine/       GMM regime classifier (5 componentes)
+│   │   ├── ml-feature-store/     Feature serving + drift detection
+│   │   └── strategy-orchestrator/ Thompson sampling allocator
+│   ├── monitoring/
+│   │   ├── rules/alpaca.yml    ALERT-004/005/006/007/008
+│   │   └── grafana/dashboards/
+│   └── frontend/               React + TypeScript + Vite + Tailwind
 │
-├── shared/                Paquete quant-shared (schemas Pydantic, features canónicos,
-│   └── quant_shared/      model registry) — migración progresiva desde platform/libs/shared
+├── shared/                     quant_shared — schemas, features, model registry
+│   └── quant_shared/
+│       ├── schemas/            OrderIntent, Fill, Signal (Pydantic v2)
+│       ├── models/registry.py  ModelCard + ModelRegistry
+│       ├── features/           19 features canónicos
+│       └── calendar/           MarketCalendar (RTH/ETH/crypto 24/7)
 │
-└── data/                  Ingestores independientes del venv de research
-    ├── ingestion.py       CCXT (Binance, Bybit, Kraken) → Parquet
-    └── real_data.py       Yahoo Finance → Parquet (FX + futuros diario)
+├── docs/
+│   ├── adr/                    35 ADRs (001–035)
+│   ├── runbooks/               alpaca_outage, position_drift, paper_trading_ops
+│   └── incidents/              DRILL-002/003/004, S12 handoff
+│
+└── tools/
+    ├── briefing/               daily.py + weekly.py (CLI + Discord)
+    └── smoke/                  post-deploy smoke test (22 checks)
 ```
 
 ---
@@ -61,130 +89,122 @@ quant_bot/
 ### Research (backtesting + ML)
 
 ```bash
-# Instalar entorno
-cd research
-pip install -e ../shared
-pip install -e .
-# Instalar extras de ingesta y dashboard (opcionales)
-pip install ccxt yfinance streamlit plotly
+# Dependencias
+pip install -e shared/
+cd research && pip install -e ".[dev]"
 
-# Tests de regresión (deben pasar antes de cualquier experimento)
+# Tests
 pytest tests/ -v
 
-# Demo end-to-end con datos reales (EURUSD diario, sin deps externas en runtime)
-python examples/pipeline_ml_real_data.py
+# Dry-run del DAG nocturno (valida entorno sin entrenar)
+python -m cli.run_nightly_retrain --dry-run
+# Exit 0 + JSON en research/artifacts/runs/ = OK
 
-# Dashboard Streamlit
-streamlit run dashboard/app.py
+# Training real (swing + daily, ~2h)
+python -m cli.run_nightly_retrain --horizons swing,daily --n-trials 25
 ```
 
-### Platform (microservicios + frontend)
+### Platform (microservicios)
 
 ```bash
 cd platform
-make up           # levanta Kafka, Redis, Postgres, todos los servicios y frontend
-make infra        # solo infraestructura (Kafka, Redis, Postgres, MongoDB)
-make services     # solo microservicios (requiere infra corriendo)
-make monitoring   # Prometheus + Grafana
+make up        # Kafka, Redis, Postgres, todos los servicios + frontend
+make monitoring  # Prometheus + Grafana
 ```
 
-URLs locales: dashboard `http://localhost:3000` · Kafka UI `http://localhost:8080` ·
-Grafana `http://localhost:3001`
+URLs: dashboard `http://localhost:3000` · Grafana `http://localhost:3001` · Kafka UI `http://localhost:8080`
 
----
+### Health check rápido
 
-## Flujo de investigación (research)
+```bash
+# Kill switch status (debe ser false)
+curl -s http://localhost:8080/health | python3 -m json.tool | grep kill_switch
 
-```
-Yahoo Finance / CCXT
-        │
-        ▼
-  OHLCV validado (parquet cache)
-        │
-        ▼
-  features/engineering.py  →  features técnicos (RSI, MACD, ATR, z-scores, vol)
-  features/regime_gmm.py   →  régimen de mercado (GMM 3–5 componentes)
-  features/pca_denoiser.py →  denoising anti-leakage
-  features/labeling.py     →  Triple-Barrier Labels {-1, 0, +1}
-        │
-        ▼
-  models/walk_forward_runner.py
-  ┌─────────────────────────────────────────────────────────┐
-  │ Por fold:                                               │
-  │  TRAIN_fit → XGBoost.fit()                             │
-  │  TRAIN_calib → IsotonicCalibrator.fit()  (ECE < 0.05) │
-  │  TRAIN_calib → EntryFilter.fit()         (threshold)   │
-  │  TEST → predict_proba → signal → Kelly → sizing        │
-  └─────────────────────────────────────────────────────────┘
-        │
-        ▼
-  Métricas OOS: PSR, DSR, Sharpe, MDD, ECE
-  + Feature importance cross-fold (Gain + SHAP)
-  + Calibration report por fold
+# Briefing semanal
+python -m tools.briefing.weekly --week $(python3 -c "from datetime import date; d=date.today(); print(f'{d.isocalendar()[0]}-W{d.isocalendar()[1]:02d}')")
 ```
 
 ---
 
-## Componentes estadísticos clave
-
-### Triple-Barrier Labeling (López de Prado)
-
-El label de cada barra no es `sign(retorno)` sino el resultado de la primera
-barrera alcanzada. Módulo canónico: [`research/features/labeling.py`](research/features/labeling.py).
-
-- **+1** si `price[t+k] > entry + mult × ATR[t]`
-- **−1** si `price[t+k] < entry - mult × ATR[t]`
-- **0** si ninguna barrera se toca en `horizon` barras (timeout)
-
-### Calibración de Probabilidades (OvR)
-
-`XGBoost.predict_proba()` devuelve softmax (scores relativos, no probabilidades
-bayesianas). Pipeline de calibración con `IsotonicRegression` one-vs-rest en
-`TRAIN_calib`, verificado con ECE < 0.05 y Brier < baseline.
-
-### PSR / DSR
+## Pipeline de inferencia (happy path)
 
 ```
-PSR(SR*) = Φ( (SR - SR*) × √(T-1) / √(1 - γ₃·SR + (γ₄-1)/4·SR²) )
-DSR = PSR( E[max SR | n_trials] )
+Kafka signal (strategy-orchestrator)
+        │
+        ▼
+execution-engine consumer
+  ├── kill_switch? → rechazar
+  ├── RiskGate (8 checks en orden):
+  │     0. kill_switch_active      ← step-0, siempre primero
+  │     1. require_paper
+  │     2. daily_dd (-3% kill)
+  │     3. per_symbol_cap (5%)
+  │     4. per_venue_cap (50%)
+  │     5. extended_hours (LIMIT only)
+  │     6. market_closed
+  │     7. PDT rule
+  │     8. cash_buffer
+  │
+  ├── AlpacaAdapter.submit()
+  │     └── CircuitBreaker (5 fallos/60s → OPEN → 30s → HALF_OPEN)
+  │
+  └── Reconciler (60s loop) → kill switch si drift > threshold
 ```
-
-Un modelo solo pasa si **PSR(0) > 95% y DSR(0) > 95%** sobre la serie OOS
-concatenada. El parámetro `n_trials` debe reflejar el número real de configuraciones
-evaluadas (ver [`research/metrics/objective.py`](research/metrics/objective.py)).
-
-### Kelly Fraccional
-
-```
-f* = (p·b - q) / b    →   usar f = f* × 0.25 (quarter Kelly)
-```
-
-Regla no negociable: `kelly_fraction ≤ 0.25` en producción.
 
 ---
 
-## Métricas objetivo (OOS)
+## Nightly Retrain DAG (S11)
 
-| Métrica | Mínimo aceptable | Objetivo |
-|---------|-----------------|----------|
-| Sharpe anual (OOS) | > 0.8 | > 1.5 |
-| PSR(SR>0) | > 90% | > 95% |
+```bash
+# Gates que debe pasar cada horizonte para promover a "staging":
+# 1. DSR nuevo ≥ 0.40 (floor absoluto)
+# 2. ECE nuevo ≤ 0.05 (calibración)
+# 3. Sin class collapse (> 5% por clase)
+# 4. DSR nuevo ≥ DSR producción × 0.95 (no regresión)
+```
+
+El DAG corre automáticamente via scheduled task (22:00 local). Run logs en `research/artifacts/runs/`.
+
+---
+
+## Métricas OOS objetivo
+
+| Métrica | Mínimo | Objetivo |
+|---------|--------|----------|
+| Sharpe anual OOS | > 0.8 | > 1.5 |
 | DSR | > 0.4 | > 0.6 |
 | ECE (calibración) | < 0.10 | < 0.05 |
 | Max Drawdown | < 25% | < 15% |
-| Calmar Ratio | > 0.5 | > 1.0 |
+| Broker latency p99 | — | < 600 ms (ADR-035) |
+| Risk gate p99 | — | < 20 ms (ADR-035) |
+
+---
+
+## ADRs clave
+
+| ADR | Decisión |
+|-----|----------|
+| 001 | Walk-forward como única métrica oficial |
+| 003 | Kelly cuarto (0.25) como default |
+| 010 | UTC + Decimal + UUID v7 en toda la plataforma |
+| 028 | Multi-horizon: intraday 5min, swing 4H, daily 1D |
+| 032 | Allocator Thompson: Beta(20,20) priors, decay 0.99/día |
+| 034 | ResMLP reemplaza DeepMLP (post paper run 2026-06-19) |
+| 035 | SLO: risk gate < 20ms, broker RTT < 600ms |
+
+Lista completa en [`docs/adr/`](docs/adr/).
 
 ---
 
 ## Reglas no negociables
 
-1. **Calibra antes de filtrar** — ECE verificado antes de usar `predict_proba()` en decisiones.
-2. **Valida OOS siempre** — PSR > 95% y DSR > 95% son el mínimo para considerar una estrategia.
-3. **Purge + embargo obligatorio** — sin esto el backtest miente por data leakage temporal.
-4. **Kelly fraccional ≤ 0.25** — Kelly completo es teóricamente óptimo, prácticamente ruinoso.
-5. **Paper trading mínimo 1 mes** antes de capital real.
-6. **`n_trials` honesto en DSR** — si optimizaste 100 combinaciones, usa `n_trials=100`.
-7. **Features con justificación económica** — no agregar indicadores porque "funcionaron in-sample".
+1. **Walk-forward o no existe** — métricas IS son irrelevantes. Solo OOS con `WalkForwardRunner`.
+2. **Calibra antes de filtrar** — ECE < 0.05 verificado antes de usar `predict_proba()`.
+3. **Purge + embargo obligatorio** — sin esto el backtest miente por leakage temporal.
+4. **Kelly fraccional ≤ 0.25** — nunca Kelly completo en producción.
+5. **Paper trading mínimo 30 días** antes de capital real, con aprobación humana explícita.
+6. **`n_trials` honesto en DSR** — si optimizaste 100 combinaciones, `n_trials=100`.
+7. **No commitear secrets** — API keys nunca en código ni `.env` commiteado.
 
 ---
 
@@ -192,11 +212,12 @@ Regla no negociable: `kelly_fraction ≤ 0.25` en producción.
 
 - López de Prado, M. (2018). *Advances in Financial Machine Learning*. Wiley.
 - Bailey, D. & López de Prado, M. (2014). "The Deflated Sharpe Ratio". *JPM*.
-- Harvey, C. R. & Liu, Y. (2015). "Backtesting". *JPM*.
+- Guo, C. et al. (2017). "On Calibration of Modern Neural Networks". *ICML*.
+- Shazeer, N. (2020). "GLU Variants Improve Transformer". *arXiv*.
 
 ---
 
 ## Disclaimer
 
-Proyecto de investigación y aprendizaje. Operar con dinero real conlleva riesgo de
-pérdida total del capital. Las performances pasadas no garantizan resultados futuros.
+Proyecto de investigación. Operar con dinero real conlleva riesgo de pérdida total del capital.
+Las performances pasadas no garantizan resultados futuros.
