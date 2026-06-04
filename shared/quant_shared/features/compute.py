@@ -11,8 +11,8 @@ Funciones estáticas — no hay estado, no hay I/O.
 from __future__ import annotations
 
 import numpy as np
-from dataclasses import dataclass, field
-from .definitions import FEATURES, FEATURE_NAMES, FEATURE_COUNT, FeatureDef
+from dataclasses import dataclass
+from .definitions import FEATURE_NAMES
 
 
 @dataclass
