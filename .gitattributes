@@ -1,0 +1,27 @@
+# Normalize line endings: store as LF, checkout as LF on all platforms.
+# This prevents the 458-file CRLF noise when working cross-platform
+# (Windows local + Linux sandbox).
+
+* text=auto eol=lf
+
+# Force LF for Python, YAML, TOML, SQL, Markdown
+*.py    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.toml  text eol=lf
+*.sql   text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.sh    text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.jsx   text eol=lf
+
+# Binaries — never touch line endings
+*.pkl    binary
+*.parquet binary
+*.png    binary
+*.jpg    binary
+*.pdf    binary
+*.zip    binary

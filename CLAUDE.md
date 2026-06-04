@@ -664,8 +664,9 @@ Frontend en `los_ojos/frontend/` (React + TypeScript + Vite + Tailwind):
 
 | Componente | Archivo | Función |
 |------------|---------|---------|
-| Modelos base | `models/zoo.py` | `LogisticBaseline`, `XGBoostClassifier`, `DeepMLPClassifier`, `LSTMClassifier` |
-| Calibración | `models/calibration.py` | `IsotonicCalibrator` (isotonic + sigmoid) |
+| Modelos base | `models/zoo.py` | `LogisticBaseline`, `XGBoostClassifier`, `DeepMLPClassifier` (legacy/baseline), `ResMLPClassifier` (deep tabular — ADR-034), `LSTMClassifier` |
+| NN layers | `research/models/nn_layers.py` | `SwiGLU`, `ResBlock`, `TemperatureScaling` (introducido en ADR-034) |
+| Calibración | `models/calibration.py` | `IsotonicCalibrator` (isotonic + sigmoid). En cascada con `TemperatureScaling` para NNs. |
 | Meta-labeling | `models/meta_labeler.py` | Segundo classifier binario |
 | Bayesian sizing | `risk/bayesian_sizer.py` | Product of experts |
 | Walk-forward | `models/walk_forward_runner.py` | Pipeline completo por fold |
@@ -684,7 +685,8 @@ Frontend en `los_ojos/frontend/` (React + TypeScript + Vite + Tailwind):
 |--------|--------|----------|--------------|
 | Logistic Regression | Baseline obligatorio | Rápido, interpretable | Solo señal lineal |
 | XGBoost | Default para tabular | Robusto, gain importance | Overfitting con max_depth alto |
-| DeepMLP | > 10K muestras, features bien escaladas | Captura no-linealidades complejas | Necesita más datos, tuning más caro |
+| DeepMLP (legacy) | Reemplazado por ResMLP en multi-horizon trainer (ADR-034) | Mantenido como baseline A/B durante shadow trading | Sin skip connections, calibración pobre out-of-the-box |
+| ResMLP | > 10K muestras, MLP profundo con skip connections + SwiGLU + BatchNorm; reemplaza DeepMLP en multi-horizon trainer | Mejor bias-variance que MLP plano; calibrable vía temperature scaling + isotonic cascade; gradientes estables hasta 6 bloques | Coste training mayor (GPU recomendado); Optuna search más caro; latency p99 mayor que XGBoost en CPU |
 | LSTM | > 100K muestras, señal secuencial real | Memoria temporal | Inestable, requiere GPU |
 | PPO/SAC (futuro) | Optimal control problem | Optimiza directamente reward, learns position management | Sample-inefficient, hard to debug |
 
@@ -1578,6 +1580,17 @@ pytest tests/ -v
 - [x] docker-compose stack completo (7 microservicios + infra + monitoring)
 - [ ] Polymarket signals integration
 - [ ] SEC research service (Dexter API)
+- [ ] **ResMLPClassifier reemplaza DeepMLP en multi-horizon trainer** (ADR-034, post paper run 2026-06-19, shadow trading → A/B 30d → canary)
+
+## 18.2b Alpaca paper trading — roadmap 12 semanas (**COMPLETO** — 2026-06-03)
+
+- [x] S1–S9: Universe, features, market calendar, brackets, risk gate PDT, reconciler (ver `alpaca_integration.md §5`)
+- [x] S10: Observabilidad — ALERT-004/005/006/007/008 (`platform/monitoring/rules/alpaca.yml`), DRILL-004 21/21 PASS
+- [x] S11: DAG nocturno — `research/pipelines/nightly_retrain.py`, gates DSR/ECE, 17/17 tests, JSON run log
+- [x] S12: Hardening — circuit breaker CLOSED→OPEN→HALF_OPEN, RiskGate kill switch step-0, ADR-035 (SLO), runbook ops, handoff doc
+- [x] P1-001: Circuit breaker (`app/brokers/_alpaca/circuit_breaker.py`)
+- [x] P1-002: RiskGate kill switch propagation (REST + Kafka, `risk_gate.py`)
+- [ ] **Pendiente**: diagnosticar 0 trades en W1-W2 (pipeline señal→executor conectividad)
 
 ## 18.3 Fase 3 — Servicios productivos (Q3)
 
@@ -1859,6 +1872,10 @@ operar en este repositorio. Es **vinculante** y persiste entre sesiones.
 | **Funding rate** | Costo periódico de mantener perpetual; revierte spot-perp. |
 | **DLQ** | Dead Letter Queue. Mensajes fallidos para inspección. |
 | **PSI** | Population Stability Index para drift detection. |
+| **SwiGLU** | Activation gated (Shazeer 2020): `SwiGLU(x) = (xW + b) ⊙ swish(xV + c)`. Empíricamente mejor que ReLU/GELU en tabular con baja SNR. |
+| **Temperature Scaling** | Post-hoc calibration de NNs (Guo et al. 2017): divide logits por `T` aprendido en val set para reducir ECE sin afectar accuracy. |
+| **ResBlock** | Bloque residual `y = x + f(LayerNorm(x))` (He et al. 2015). Estabiliza gradientes en NN profundas; permite > 4 capas sin degradación. |
+| **ResMLP** | MLP profunda con bloques residuales, BatchNorm/LayerNorm, SwiGLU y dropout. Reemplaza DeepMLP en multi-horizon trainer (ADR-034). |
 
 ## APÉNDICE B — Referencias canónicas
 
@@ -1889,9 +1906,10 @@ operar en este repositorio. Es **vinculante** y persiste entre sesiones.
 | 012 | Build context de Docker en root (`.`) para acceso a `libs/shared/` | Accepted |
 | 013 | Kafka → Redis PubSub → WebSocket (no Kafka directo a WS) | Accepted |
 | 014 | GMM 5 componentes con semantic label mapping via centroides | Accepted |
+| 034 | ResMLPClassifier reemplaza DeepMLPClassifier en multi-horizon trainer | Proposed |
 
 ---
 
-**Última actualización**: 2026-05-14 (sesión 2 — Los Ojos platform implementada)
+**Última actualización**: 2026-06-03 (sesión S12 — roadmap Alpaca 12 semanas COMPLETO; P1-001/P1-002 cerrados; ADR-035 SLO; runbook ops; NightlyRetrainDAG 17/17 tests)
 **Maintainers**: Alex (lead), Claude (AI assistant)
 **Status**: Living document. Actualizar con cada cambio arquitectónico.

@@ -110,12 +110,35 @@ class RiskGate:
     >>> decision = await gate.evaluate(intent, account)
     >>> if decision.approved:
     ...     result = await broker.submit(intent)
+
+    Notes
+    -----
+    Kill switch: call :meth:`trip_kill_switch` to block all new intents
+    immediately (checked before every other check).  Call
+    :meth:`reset_kill_switch` to re-enable submission.  Wired from
+    ``main.py._make_kill_switch_callback`` so that the reconciler can also
+    block REST-submitted intents, not just the Kafka consumer loop.
     """
 
     def __init__(self, config: RiskConfig, repository: Repository):
-        self.config      = config
-        self.repo        = repository
-        self.pdt_tracker = PDTTracker(repository)
+        self.config             = config
+        self.repo               = repository
+        self.pdt_tracker        = PDTTracker(repository)
+        self._kill_switch_active = False
+
+    # -----------------------------------------------------------------------
+    # Kill switch
+    # -----------------------------------------------------------------------
+
+    def trip_kill_switch(self) -> None:
+        """Block all new intents.  Idempotent."""
+        self._kill_switch_active = True
+        logger.critical("risk_gate.kill_switch.tripped")
+
+    def reset_kill_switch(self) -> None:
+        """Re-enable intent submission.  Idempotent."""
+        self._kill_switch_active = False
+        logger.warning("risk_gate.kill_switch.reset")
 
     # -----------------------------------------------------------------------
     # Public API
@@ -159,6 +182,14 @@ class RiskGate:
         intent: OrderIntent,
         account: AccountInfo,
     ) -> RiskDecision:
+        # ---- 0. kill switch (checked before everything else) ----
+        if self._kill_switch_active:
+            return RiskDecision(
+                approved=False,
+                breach="kill_switch",
+                reason="Kill switch is active — all new intents blocked",
+            )
+
         # ---- 1. require_paper (global safety) ----
         if self.config.require_paper and not account.is_paper:
             return RiskDecision(

@@ -1,0 +1,78 @@
+groups:
+  - name: alpaca_circuit_breaker
+    interval: 15s
+    rules:
+      # ALERT-004: circuit breaker OPEN (state=1)
+      # Fires when the Alpaca circuit breaker has been open for > 30s,
+      # meaning the adapter is actively rejecting all submissions.
+      - alert: AlpacaCircuitBreakerOpen
+        expr: alpaca_circuit_breaker_state == 1
+        for: 30s
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Alpaca circuit breaker OPEN"
+          description: >
+            The Alpaca circuit breaker has been in OPEN state for more than 30s.
+            All order submissions are currently blocked.
+            Check execution-engine logs for the root cause (5xx storm or network issue).
+            Manual reset endpoint: POST /api/kill_switch/reset after verifying connectivity.
+
+      # ALERT-005: circuit breaker HALF_OPEN (state=2) — informational warning
+      - alert: AlpacaCircuitBreakerHalfOpen
+        expr: alpaca_circuit_breaker_state == 2
+        for: 0s
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Alpaca circuit breaker HALF_OPEN (probing)"
+          description: >
+            The Alpaca circuit breaker is in HALF_OPEN state.
+            One probe call will be attempted.  Watch for ALERT-004 if it fails.
+
+      # ALERT-006: high rate of circuit breaker rejections
+      - alert: AlpacaCircuitBreakerHighRejectionRate
+        expr: >
+          rate(alpaca_circuit_breaker_calls_total{outcome="rejected"}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Alpaca circuit breaker rejecting > 6 calls/min"
+          description: >
+            The circuit breaker is rejecting calls at an elevated rate.
+            This may indicate the breaker is stuck OPEN or recovery is not happening.
+
+  - name: alpaca_submission
+    interval: 30s
+    rules:
+      # ALERT-007: 5xx error rate spike (precursor to circuit breaker opening)
+      - alert: AlpacaHighErrorRate
+        expr: >
+          rate(alpaca_submit_attempts_total{result="5xx"}[5m])
+          / (rate(alpaca_submit_attempts_total[5m]) + 0.001) > 0.20
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Alpaca submission error rate > 20%"
+          description: >
+            More than 20% of Alpaca order submissions are returning 5xx errors.
+            Circuit breaker may open soon if the pattern continues.
+
+      # ALERT-008: rate limiter saturation
+      - alert: AlpacaRateLimiterSaturated
+        expr: rate(alpaca_429_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Alpaca 429 Too Many Requests — rate limiter saturated"
+          description: >
+            Alpaca is returning 429 responses at > 3/min for 5+ minutes.
+            Review order submission frequency and AlpacaRateLimiter config.

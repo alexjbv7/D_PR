@@ -50,6 +50,7 @@ from quant_shared.schemas.orders import (
 from .base import AccountInfo, BrokerAdapter, BrokerError
 from . import _symbol_mapping as sym_map
 from ._alpaca import bracket_builder
+from ._alpaca.circuit_breaker import AlpacaCircuitBreaker, CircuitBreakerOpenError
 from ._alpaca.rate_limiter import AlpacaRateLimiter
 from ._alpaca.retry import retry_with_jitter
 from ._alpaca.market_data import AlpacaMarketData
@@ -262,12 +263,14 @@ class AlpacaAdapter(BrokerAdapter):
         client_factory: Optional[Any] = None,
         rate_limiter: Optional[AlpacaRateLimiter] = None,
         market_data: Optional[AlpacaMarketData] = None,
+        circuit_breaker: Optional[AlpacaCircuitBreaker] = None,
     ):
         self.config = config or AlpacaConfig()
         self._client_factory = client_factory
         self._client: Any = None
         self._rate_limiter = rate_limiter or AlpacaRateLimiter()
         self._market_data = market_data
+        self._circuit_breaker = circuit_breaker or AlpacaCircuitBreaker()
 
     # -----------------------------------------------------------------------
     # Lifecycle
@@ -490,9 +493,13 @@ class AlpacaAdapter(BrokerAdapter):
         await self._rate_limiter.acquire("trading")
         t0 = _time.monotonic()
         try:
-            raw = await self._submit_with_retry(client, request)
+            async with self._circuit_breaker:
+                raw = await self._submit_with_retry(client, request)
             _record_submit("success")
             return self._alpaca_order_to_result(raw, intent_id=intent.intent_id)
+        except CircuitBreakerOpenError as exc:
+            _record_submit("4xx")   # treat as client-side rejection
+            raise BrokerError(f"Alpaca submit blocked by circuit breaker: {exc}") from exc
         except Exception as exc:                                     # noqa: BLE001
             self._classify_and_record(exc)
             raise BrokerError(f"Alpaca submit failed: {exc}") from exc

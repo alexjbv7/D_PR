@@ -243,6 +243,10 @@ def _make_anomaly_emitter(producer: Any, settings: Settings):
 def _make_kill_switch_callback(state: AppState):
     async def trip(reason: str):
         state.kill_switch_tripped = True
+        # Also propagate to RiskGate so REST-submitted intents are blocked,
+        # not just the Kafka consumer loop (fixes P1-002).
+        if state.risk_gate is not None:
+            state.risk_gate.trip_kill_switch()
         logger.critical("kill_switch.tripped reason=%s", reason)
     return trip
 
@@ -410,6 +414,8 @@ async def kill_switch(action: str):
         if state.reconciler is not None:
             state.reconciler._kill_switch_tripped = False
             state.reconciler._consecutive_failures = 0
+        if state.risk_gate is not None:
+            state.risk_gate.reset_kill_switch()
         logger.warning("kill_switch.manual_reset")
     else:
         raise HTTPException(400, f"unknown action: {action}")

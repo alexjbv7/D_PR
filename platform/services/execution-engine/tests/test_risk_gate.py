@@ -241,3 +241,42 @@ async def test_market_order_skips_notional_checks(repo, paper_account):
     )
     decision = await gate.evaluate(intent, paper_account)
     assert decision.approved is True
+
+
+# ---------------------------------------------------------------------------
+# Kill switch (P1-002)
+# ---------------------------------------------------------------------------
+
+async def test_kill_switch_blocks_all_intents(repo, paper_account):
+    """trip_kill_switch() must be checked before every other rule."""
+    gate   = RiskGate(RiskConfig(), repo)
+    gate.trip_kill_switch()
+    intent = _intent(qty="0.001")          # would otherwise pass all checks
+
+    decision = await gate.evaluate(intent, paper_account)
+
+    assert decision.approved is False
+    assert decision.breach   == "kill_switch"
+
+
+async def test_kill_switch_idempotent_trip(repo, paper_account):
+    gate = RiskGate(RiskConfig(), repo)
+    gate.trip_kill_switch()
+    gate.trip_kill_switch()                # second trip must not raise
+    assert gate._kill_switch_active is True
+
+
+async def test_kill_switch_reset_re_enables_gate(repo, paper_account):
+    gate   = RiskGate(RiskConfig(), repo)
+    gate.trip_kill_switch()
+    gate.reset_kill_switch()
+    intent = _intent(qty="0.001")
+
+    decision = await gate.evaluate(intent, paper_account)
+
+    assert decision.approved is True
+
+
+async def test_kill_switch_not_active_by_default(repo):
+    gate = RiskGate(RiskConfig(), repo)
+    assert gate._kill_switch_active is False
