@@ -362,7 +362,7 @@ class NightlyRetrainDAG:
         Mirrors the stub in research/cli/train_multi_horizon.py.
         """
         cfg = self.config
-        bar_sizes = {"intraday": "5min", "swing": "4H", "daily": "B"}
+        bar_sizes = {"intraday": "5min", "swing": "4h", "daily": "B"}
         n_bars = {"intraday": 1000, "swing": 800, "daily": 500}
 
         datasets: dict[str, tuple[pd.DataFrame, pd.Series, pd.Series]] = {}
