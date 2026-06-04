@@ -362,7 +362,7 @@ class NightlyRetrainDAG:
         Mirrors the stub in research/cli/train_multi_horizon.py.
         """
         cfg = self.config
-        bar_sizes = {"intraday": "5min", "swing": "4H", "daily": "B"}
+        bar_sizes = {"intraday": "5min", "swing": "4h", "daily": "B"}
         n_bars = {"intraday": 1000, "swing": 800, "daily": 500}
 
         datasets: dict[str, tuple[pd.DataFrame, pd.Series, pd.Series]] = {}
@@ -381,20 +381,6 @@ class NightlyRetrainDAG:
             )
             regime_cols = [c for c in feature_names if c.startswith("regime_prob_")]
             if regime_cols:
-                raw = X[regime_cols].abs()
-                X[regime_cols] = raw.div(raw.sum(axis=1), axis=0)
-            for sc in ("session_pre", "session_rth", "session_post"):
-                if sc in X.columns:
-                    X[sc] = 0
-            if "session_rth" in X.columns:
-                X["session_rth"] = 1
-            y = pd.Series(rng.choice([-1, 0, 1], size=n), index=idx)
-            prices = pd.Series(
-                100.0 * (1 + rng.normal(0, 0.01, n)).cumprod(), index=idx
-            )
-            datasets[hcfg.name] = (X, y, prices)
-        return datasets
-:
                 raw = X[regime_cols].abs()
                 X[regime_cols] = raw.div(raw.sum(axis=1), axis=0)
             for sc in ("session_pre", "session_rth", "session_post"):
