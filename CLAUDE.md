@@ -1907,9 +1907,13 @@ operar en este repositorio. Es **vinculante** y persiste entre sesiones.
 | 013 | Kafka → Redis PubSub → WebSocket (no Kafka directo a WS) | Accepted |
 | 014 | GMM 5 componentes con semantic label mapping via centroides | Accepted |
 | 034 | ResMLPClassifier reemplaza DeepMLPClassifier en multi-horizon trainer | Proposed |
+| 035 | SLO: risk gate < 20ms, broker RTT < 600ms (Python executor vs §2.2) | Accepted |
+| 036 | **DRL-First**: Deep Reinforcement Learning como arquitectura primaria | Accepted |
+| 037 | Diseño del Environment DRL (estado, acción, reward) | Accepted |
+| 038 | Arquitectura de redes policy/value (DQN → PPO → SAC) | Accepted |
 
 ---
 
-**Última actualización**: 2026-06-03 (sesión S12 — roadmap Alpaca 12 semanas COMPLETO; P1-001/P1-002 cerrados; ADR-035 SLO; runbook ops; NightlyRetrainDAG 17/17 tests)
+**Última actualización**: 2026-06-03 (ADR-036 DRL-First; pivot arquitectura primaria a Deep RL; XGBoost como baseline; escalera Q-learning→DQN→PPO→SAC)
 **Maintainers**: Alex (lead), Claude (AI assistant)
 **Status**: Living document. Actualizar con cada cambio arquitectónico.
