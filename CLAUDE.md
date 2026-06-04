@@ -470,19 +470,30 @@ estructura. Aquí el resumen.
 | KPI | Vega-normalized P&L |
 | Riesgos | Vol spikes (gap risk) |
 
-## 4.9 RL trading
+## 4.9 Deep Reinforcement Learning (arquitectura primaria — ADR-036)
+
+> **DRL es la arquitectura primaria del bot.** No es una estrategia más — es el
+> paradigma de decisión central. XGBoost se mantiene como baseline de comparación.
+> Ver ADR-036, ADR-037, ADR-038 para especificación completa.
 
 | Campo | Valor |
 |-------|-------|
-| Horizonte | Variable (aprendido) |
-| Inputs | Estado de mercado discretizado/continuo |
-| Features | Mismas que swing + p_win primario |
-| Modelo | Q-learning tabular (MVP) → PPO/SAC (prod) |
-| Risk | Hard caps externos al RL (RL no debe romper risk limits) |
-| KPI | Sharpe vs baseline supervised |
-| Riesgos | Distribución shift, training instability |
+| Horizonte | Variable (aprendido por el agente) |
+| Estado | 42-dim: mercado + régimen GMM + portfolio + macro (ADR-037) |
+| Acción | {-1,0,+1} discreta (DQN MVP) → ∈[-1,1] continua (PPO/SAC) |
+| Reward | P&L realizado − penalización DD − costos − idle penalty (ADR-037) |
+| Backbone | TradingResMLP: ResBlock + SwiGLU + LayerNorm (ADR-038) |
+| Escalera | Q-learning tabular → DQN → PPO → SAC |
+| Risk | RiskGate externo siempre — el agente nunca decide risk limits (ADR-009) |
+| KPI | DSR agente > DSR XGBoost baseline en OOS walk-forward |
+| Riesgos | Reward hacking, overfitting a período de entrenamiento, training instability |
+| Implementación | `research/models/drl/` + `research/envs/trading_env.py` |
 
-> MVP implementado en `models/rl_agent.py` (Q-learning tabular).
+**Escalera de implementación:**
+1. **[ACTUAL]** Q-learning tabular — `research/models/rl_agent.py`
+2. **[EN PROGRESO]** DQN — `research/models/drl/dqn.py` (Agent 2 Cursor)
+3. **[PRÓXIMO]** PPO actor-critic — acción continua, sizing fraccional
+4. **[OBJETIVO]** SAC — off-policy, máxima sample efficiency, producción
 
 ## 4.10 Multi-agent system
 
@@ -748,18 +759,48 @@ gates:
 - **Stacking**: meta-learner (logistic) sobre proba de N base models.
 - **Bayesian Model Averaging**: pesos = posterior P(model | data).
 
-## 6.10 Reinforcement Learning
+## 6.10 Deep Reinforcement Learning (arquitectura primaria)
 
-Roadmap:
-1. **MVP (actual)**: Q-learning tabular sobre estado discretizado
-   `(regime_bin, p_win_bin, trend_bin)` → acción `{-1,0,+1}`.
-2. **Q1+**: DQN con replay buffer y target network.
-3. **Q2+**: PPO con policy continuous (position sizing fraccional).
-4. **Q3+**: SAC para mejor sample efficiency.
-5. **Multi-agent**: PPO por estrategia + meta-bandit para asignar capital.
+> DRL es el paradigma central del sistema. Ver ADR-036/037/038 para diseño completo.
 
-Anti-pattern conocido: dejar al RL decidir risk limits.
-**Risk limits son externos al agente RL, siempre.**
+### Formulación MDP
+
+```
+Estado  s_t : ℝ^42  (mercado + régimen + portfolio + macro)
+Acción  a_t : {-1,0,+1} MVP  →  ∈[-1,1] continua (PPO/SAC)
+Reward  r_t : P&L_realizado/equity − λ·DD − costos − idle_penalty
+Política π  : TradingResMLP → distribución sobre acciones
+```
+
+### Escalera de implementación
+
+| Paso | Algoritmo | Estado | Archivos |
+|------|-----------|--------|----------|
+| 1 ✅ | Q-learning tabular | Producción MVP | `research/models/rl_agent.py` |
+| 2 🔵 | DQN + ReplayBuffer | En implementación | `research/models/drl/dqn.py` |
+| 3 ⚪ | PPO actor-critic | Roadmap | `research/models/drl/ppo.py` |
+| 4 ⚪ | SAC twin-critics | Roadmap | `research/models/drl/sac.py` |
+
+### Backbone: TradingResMLP (ADR-038)
+
+```
+Input (42) → Linear → [ResBlock × N] → LayerNorm → embedding (256)
+ResBlock: LayerNorm → SwiGLU → Linear → Dropout → skip connection
+```
+
+### Validación
+
+- Walk-forward obligatorio (igual que ML supervisado)
+- Comparar DSR agente vs DSR XGBoost baseline en cada promoción
+- Early stopping: Sharpe rolling 30 episodios en val set
+- Test set (año 2026) se toca **una sola vez**, al final
+
+### Anti-patterns prohibidos
+
+- ❌ Dejar al agente decidir risk limits — siempre externos en RiskGate (ADR-009)
+- ❌ Evaluar en el período de entrenamiento — walk-forward OOS siempre
+- ❌ Reward con P&L no realizado — incentiva mantener posiciones perdedoras
+- ❌ Promover si DSR agente ≤ DSR XGBoost — el DRL debe superar el baseline
 
 ---
 
@@ -1911,6 +1952,7 @@ operar en este repositorio. Es **vinculante** y persiste entre sesiones.
 | 036 | **DRL-First**: Deep Reinforcement Learning como arquitectura primaria | Accepted |
 | 037 | Diseño del Environment DRL (estado, acción, reward) | Accepted |
 | 038 | Arquitectura de redes policy/value (DQN → PPO → SAC) | Accepted |
+| 039 | Pipeline de entrenamiento DRL (loop, checkpointing, gates, Optuna) | Accepted |
 
 ---
 
