@@ -1,0 +1,395 @@
+"""
+Gymnasium-compatible trading environment for DRL (ADR-037).
+
+State vector layout (42 dims): market (15) | regime (7) | portfolio (5) | reserved (15).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import gymnasium as gym
+import numpy as np
+import pandas as pd
+
+# Actions (ADR-037 MVP)
+ACTION_SELL = 0
+ACTION_HOLD = 1
+ACTION_BUY = 2
+
+# Observation layout indices
+_MARKET_COLS: tuple[str | None, ...] = (
+    "ret_1",
+    "ret_5",
+    "ret_20",
+    "vol_realized_20",
+    "vol_z_60",
+    "rsi_14",
+    "macd_signal",
+    "atr_14",
+    "bb_pct",
+    "volume_z_20",
+    "ob_imbalance",
+    "spread_bps",
+    "funding_z_60",
+    "session_rth",
+    None,  # placeholder
+)
+
+_REGIME_COLS: tuple[str, ...] = (
+    "regime_prob_0",
+    "regime_prob_1",
+    "regime_prob_2",
+    "regime_prob_3",
+    "regime_prob_4",
+    "regime_stability",
+    "vol_regime",
+)
+
+_OBS_DIM = 42
+_MARKET_DIM = 15
+_REGIME_DIM = 7
+_PORTFOLIO_DIM = 5
+
+
+@dataclass
+class EnvironmentConfig:
+    """Parámetros del environment — dataclass con defaults."""
+
+    # Reward
+    lambda_dd: float = 2.0
+    dd_threshold: float = 0.02
+    lambda_vol: float = 0.5
+    idle_penalty: float = 0.001
+    max_idle_bars: int = 20
+    fee_bps: float = 5.0  # 5 bps maker fee Alpaca
+
+    # Episode
+    episode_length: int = 252  # barras por episodio
+    obs_dim: int = 42
+
+
+def compute_reward(
+    pnl_realized: float,
+    equity: float,
+    drawdown: float,
+    vol_realized: float,
+    vol_target: float,
+    delta_position: float,
+    price: float,
+    fee_bps: float,
+    holding_bars: int,
+    *,
+    lambda_dd: float = 2.0,
+    dd_threshold: float = 0.02,
+    lambda_vol: float = 0.5,
+    max_idle_bars: int = 20,
+    idle_penalty: float = 0.001,
+) -> float:
+    """
+  Compute step reward (pure function — ADR-037).
+
+  Parameters
+  ----------
+  pnl_realized : float
+      Realized P&L this step (currency units).
+  equity : float
+      Current equity (must be > 0).
+  drawdown : float
+      Current drawdown fraction [0, 1].
+  vol_realized : float
+      Realized volatility at t.
+  vol_target : float
+      Target / reference volatility.
+  delta_position : float
+      Absolute position change (e.g. 0, 1, or 2 for discrete {-1,0,1}).
+  price : float
+      Current price (for transaction cost scaling).
+  fee_bps : float
+      Fee in basis points.
+  holding_bars : int
+      Bars since last entry while in a position.
+  lambda_dd, dd_threshold, lambda_vol, max_idle_bars, idle_penalty
+      Reward shaping hyperparameters.
+
+  Returns
+  -------
+  float
+      Scalar reward for the transition.
+  """
+    if equity <= 0.0:
+        equity = 1e-8
+
+    r_pnl = pnl_realized / equity
+    r_risk = (
+        -lambda_dd * max(0.0, drawdown - dd_threshold)
+        - lambda_vol * max(0.0, vol_realized - vol_target)
+    )
+    r_cost = -(fee_bps / 10_000.0) * abs(delta_position) * price
+    r_idle = -idle_penalty if holding_bars > max_idle_bars else 0.0
+
+    return float(r_pnl + r_risk + r_cost + r_idle)
+
+
+class TradingEnvironment(gym.Env):
+    """
+    Environment DRL para trading algorítmico.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        DEBE tener columnas: close, ret_1, ret_5, ret_20, vol_realized_20,
+        vol_z_60, rsi_14, macd_signal, atr_14, bb_pct, volume_z_20,
+        ob_imbalance (puede ser 0 si no hay LOB), spread_bps (puede ser 0),
+        funding_z_60 (puede ser 0), session_rth,
+        regime_prob_0..4, regime_stability, vol_regime.
+        Index: DatetimeIndex UTC.
+    config : EnvironmentConfig
+        Parámetros de episodio y reward.
+    seed : int
+        Semilla para reset aleatorio de ventanas de episodio.
+
+    Observation space: Box(-3, 3, shape=(42,), float32)
+    Action space MVP: Discrete(3)  — 0=SELL 1=HOLD 2=BUY
+    """
+
+    metadata: dict[str, Any] = {"render_modes": []}
+
+    action_space = gym.spaces.Discrete(3)
+    observation_space = gym.spaces.Box(
+        low=-3.0,
+        high=3.0,
+        shape=(_OBS_DIM,),
+        dtype=np.float32,
+    )
+
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        config: EnvironmentConfig | None = None,
+        seed: int = 0,
+    ) -> None:
+        super().__init__()
+        self._validate_data(data)
+        self.data = data.sort_index()
+        self.config = config or EnvironmentConfig()
+        if self.config.obs_dim != _OBS_DIM:
+            raise ValueError(f"obs_dim must be {_OBS_DIM}, got {self.config.obs_dim}")
+
+        self._rng = np.random.default_rng(seed)
+
+        self._bar_idx: int = 0
+        self._episode_step: int = 0
+        self._position: int = 0
+        self._entry_price: float = 0.0
+        self._equity: float = 1.0
+        self._peak_equity: float = 1.0
+        self._holding_bars: int = 0
+        self._daily_pnl: float = 0.0
+        self._episode_start_idx: int = 0
+
+    @staticmethod
+    def _validate_data(data: pd.DataFrame) -> None:
+        if "close" not in data.columns:
+            raise ValueError("data must contain column 'close'")
+        if not isinstance(data.index, pd.DatetimeIndex):
+            raise ValueError("data index must be a DatetimeIndex")
+        if data.index.tz is None:
+            raise ValueError("data index must be timezone-aware (UTC)")
+        if str(data.index.tz) != "UTC":
+            # Normalize to UTC for contract compliance
+            pass
+
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        super().reset(seed=seed)
+        if seed is not None:
+            self._rng = np.random.default_rng(seed)
+
+        ep_len = self.config.episode_length
+        max_start = len(self.data) - ep_len - 1
+        if max_start < 0:
+            raise ValueError(
+                f"data length {len(self.data)} insufficient for episode_length {ep_len}"
+            )
+        self._episode_start_idx = int(self._rng.integers(0, max_start + 1))
+        self._bar_idx = self._episode_start_idx
+        self._episode_step = 0
+        self._position = 0
+        self._entry_price = 0.0
+        self._equity = 1.0
+        self._peak_equity = 1.0
+        self._holding_bars = 0
+        self._daily_pnl = 0.0
+
+        obs = self._build_observation()
+        return obs, {}
+
+    def step(
+        self, action: int
+    ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        if action not in (ACTION_SELL, ACTION_HOLD, ACTION_BUY):
+            raise ValueError(f"invalid action {action}")
+
+        row = self.data.iloc[self._bar_idx]
+        price = float(row["close"])
+        old_position = self._position
+
+        new_position, pnl_realized = self._apply_action(action, price)
+        delta_position = float(abs(new_position - old_position))
+
+        self._position = new_position
+        if self._position != 0:
+            if old_position == 0:
+                self._holding_bars = 0
+            self._holding_bars += 1
+        else:
+            self._holding_bars = 0
+
+        self._equity += pnl_realized
+        self._daily_pnl += pnl_realized
+        self._peak_equity = max(self._peak_equity, self._equity)
+        drawdown = 0.0
+        if self._peak_equity > 0.0:
+            drawdown = max(0.0, (self._peak_equity - self._equity) / self._peak_equity)
+
+        vol_realized = float(row.get("vol_realized_20", 0.0))
+        vol_target = vol_realized  # historical reference at t
+
+        reward = compute_reward(
+            pnl_realized=pnl_realized,
+            equity=self._equity,
+            drawdown=drawdown,
+            vol_realized=vol_realized,
+            vol_target=vol_target,
+            delta_position=delta_position,
+            price=price,
+            fee_bps=self.config.fee_bps,
+            holding_bars=self._holding_bars,
+            lambda_dd=self.config.lambda_dd,
+            dd_threshold=self.config.dd_threshold,
+            lambda_vol=self.config.lambda_vol,
+            max_idle_bars=self.config.max_idle_bars,
+            idle_penalty=self.config.idle_penalty,
+        )
+
+        self._episode_step += 1
+        self._bar_idx += 1
+
+        terminated = self._episode_step >= self.config.episode_length
+        truncated = False
+
+        if terminated and self._position != 0:
+            # Mark-to-market at episode end (ADR-037)
+            final_price = float(self.data.iloc[min(self._bar_idx, len(self.data) - 1)]["close"])
+            mtm = self._close_position(final_price)
+            self._equity += mtm
+            self._daily_pnl += mtm
+            reward += compute_reward(
+                pnl_realized=mtm,
+                equity=max(self._equity, 1e-8),
+                drawdown=drawdown,
+                vol_realized=vol_realized,
+                vol_target=vol_target,
+                delta_position=0.0,
+                price=final_price,
+                fee_bps=self.config.fee_bps,
+                holding_bars=self._holding_bars,
+                lambda_dd=self.config.lambda_dd,
+                dd_threshold=self.config.dd_threshold,
+                lambda_vol=self.config.lambda_vol,
+                max_idle_bars=self.config.max_idle_bars,
+                idle_penalty=self.config.idle_penalty,
+            )
+            self._position = 0
+            self._holding_bars = 0
+
+        obs = self._build_observation()
+        info: dict[str, Any] = {
+            "equity": self._equity,
+            "position": self._position,
+            "pnl_realized": pnl_realized,
+        }
+        return obs, reward, terminated, truncated, info
+
+    def _apply_action(self, action: int, price: float) -> tuple[int, float]:
+        """Map discrete action to target position; return (position, realized_pnl)."""
+        if action == ACTION_HOLD:
+            return self._position, 0.0
+        target = -1 if action == ACTION_SELL else 1
+        if target == self._position:
+            return self._position, 0.0
+        pnl = 0.0
+        if self._position != 0:
+            pnl = self._close_position(price)
+        self._entry_price = price
+        return target, pnl
+
+    def _close_position(self, price: float) -> float:
+        if self._position == 0:
+            return 0.0
+        ret = (price - self._entry_price) / self._entry_price
+        pnl = float(self._position * ret * self._equity)
+        self._entry_price = 0.0
+        return pnl
+
+    def _build_observation(self) -> np.ndarray:
+        """Assemble 42-dim state per ADR-037; clip to [-3, 3]."""
+        obs = np.zeros(_OBS_DIM, dtype=np.float32)
+        idx = self._bar_idx
+        if idx >= len(self.data):
+            idx = len(self.data) - 1
+        row = self.data.iloc[idx]
+
+        # Market block (15)
+        for i, col in enumerate(_MARKET_COLS):
+            if col is None:
+                obs[i] = 0.0
+            elif col in row.index:
+                obs[i] = float(row[col])
+            else:
+                obs[i] = 0.0
+
+        base = _MARKET_DIM
+        # Regime block (7)
+        for j, col in enumerate(_REGIME_COLS):
+            if col in row.index:
+                obs[base + j] = float(row[col])
+            else:
+                obs[base + j] = 0.0
+
+        base += _REGIME_DIM
+        # Portfolio block (5)
+        unrealized = 0.0
+        if self._position != 0 and self._entry_price > 0.0:
+            price = float(row["close"])
+            ret = (price - self._entry_price) / self._entry_price
+            unrealized = float(self._position * ret)
+
+        max_holding = max(1, self.config.episode_length)
+        holding_norm = min(1.0, self._holding_bars / max_holding)
+        daily_pnl_pct = self._daily_pnl / max(self._equity, 1e-8)
+        cash_ratio = 1.0 if self._position == 0 else max(0.0, 1.0 - abs(unrealized))
+
+        portfolio = np.array(
+            [
+                float(self._position),
+                np.clip(unrealized / 0.10, -1.0, 1.0),
+                holding_norm,
+                np.clip(daily_pnl_pct / 0.05, -1.0, 1.0),
+                cash_ratio,
+            ],
+            dtype=np.float32,
+        )
+        obs[base : base + _PORTFOLIO_DIM] = portfolio
+        # Remaining dims (macro reserved) stay zero
+
+        return np.clip(obs, -3.0, 3.0).astype(np.float32)
+
+    def render(self) -> None:
+        """No-op render (MVP)."""
