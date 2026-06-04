@@ -1,11 +1,28 @@
-# quant_bot — Monorepo de Trading Algorítmico ML
+# quant_bot — Deep Reinforcement Learning Trading System
 
-Sistema institucional de trading algorítmico construido sobre Machine Learning,
-siguiendo las prácticas de López de Prado (*Advances in Financial Machine Learning*)
-y operando en **paper trading sobre Alpaca** (run activo: 2026-05-20 → 2026-06-19).
+Sistema institucional de trading algorítmico basado en **Deep Reinforcement Learning (DRL)**.
+El agente aprende directamente una política de trading óptima a partir de la interacción
+con el mercado, sin necesidad de labelear manualmente la dirección del precio.
+
+Opera en **paper trading sobre Alpaca** (run activo: 2026-05-20 → 2026-06-19).
 
 > **Documento maestro**: [`CLAUDE.md`](CLAUDE.md) — arquitectura, ADRs, roadmap y reglas para agentes IA.  
 > **Runbook de operación**: [`docs/runbooks/paper_trading_ops.md`](docs/runbooks/paper_trading_ops.md)
+
+---
+
+## Filosofía: por qué DRL y no ML supervisado
+
+| | ML supervisado (XGBoost) | **DRL (objetivo)** |
+|---|---|---|
+| **Objetivo** | Predecir dirección del precio | Maximizar P&L ajustado por riesgo |
+| **Labels** | Requiere Triple-Barrier labels manuales | No — aprende del reward directo |
+| **Acción** | Señal binaria → ejecutar o no | Política continua: tamaño + dirección + timing |
+| **Adaptación** | Estática entre retrainings | Se adapta online al régimen de mercado |
+| **Limitación** | Asume que predecir ≈ ganar | Optimiza directamente lo que importa |
+
+XGBoost se mantiene como **baseline de comparación** para medir si el agente DRL
+realmente supera al enfoque clásico.
 
 ---
 
@@ -17,8 +34,107 @@ y operando en **paper trading sobre Alpaca** (run activo: 2026-05-20 → 2026-06
 | Execution engine | 🟢 Operativo | Circuit breaker + kill switch |
 | Nightly retrain DAG | 🟢 Configurado | dry-run diario, gates DSR/ECE |
 | Observabilidad | 🟢 Activo | Prometheus + Grafana + 5 alert rules |
-| Multi-horizon ML | 🟡 Staging | intraday/swing/daily, esperando datos reales |
+| Q-learning tabular (MVP) | 🟡 Activo | Estado discretizado, acción {-1, 0, +1} |
+| DQN (siguiente paso) | 🔵 En diseño | Red neuronal como función Q |
+| PPO / SAC (objetivo) | ⚪ Roadmap | Política continua, sizing fraccional |
 | Live trading | ⚪ No iniciado | Requiere 30d paper sin P0 + aprobación humana |
+
+---
+
+## Arquitectura DRL
+
+### Formulación del problema
+
+```
+Estado (s):    vector de features de mercado + estado del portfolio
+               ├── Features técnicos: RSI, MACD, ATR, z-scores, vol
+               ├── Régimen: GMM probs (5 componentes)
+               ├── Macro / on-chain: FRED, whale flows, funding rate
+               └── Portfolio: posición actual, P&L no realizado, cash
+
+Acción (a):    {-1 = vender, 0 = mantener, +1 = comprar}  ← MVP tabular
+               → continua ∈ [-1, 1] = fracción de Kelly     ← PPO/SAC target
+
+Reward (r):    P&L realizado ajustado por riesgo
+               r_t = pnl_t - λ × volatility_t - c × |Δposition_t|
+               donde λ = aversión al riesgo, c = costos de transacción
+
+Política (π):  red neuronal → mapea estado a distribución sobre acciones
+```
+
+### Evolución de modelos (roadmap)
+
+```
+[ACTUAL]    Q-learning tabular
+            Estado discretizado (regime_bin × p_win_bin × trend_bin)
+            Q-table 3D: O(estados × acciones) parámetros
+            research/models/rl_agent.py
+
+[PRÓXIMO]   DQN (Deep Q-Network)
+            Red neuronal sustituye la Q-table
+            Replay buffer + target network (estabilidad)
+            Arquitectura: ResMLP 3 bloques → Q(s, a)
+
+[OBJETIVO]  PPO (Proximal Policy Optimization)
+            Policy network + value network (actor-critic)
+            Acción continua → sizing fraccional directo
+            Clip ratio ε = 0.2, GAE λ = 0.95
+
+[AVANZADO]  SAC (Soft Actor-Critic)
+            Maximum entropy → exploración robusta
+            Off-policy → sample efficiency superior a PPO
+            Ideal para paper → live transition
+```
+
+### Arquitectura de red (policy / value function)
+
+```
+Input: [features mercado | portfolio state]   # dim ≈ 50–80
+        │
+        ▼
+  ResMLP backbone (bloques residuales)
+  ┌─────────────────────────────────────────┐
+  │  Block 1: Linear → SwiGLU → LayerNorm  │
+  │  Block 2: Linear → SwiGLU → LayerNorm  │  ← skip connections
+  │  Block 3: Linear → SwiGLU → LayerNorm  │    gradientes estables
+  └─────────────────────────────────────────┘
+        │
+        ├─── Policy head  → distribución sobre acciones (softmax / Normal)
+        └─── Value head   → V(s) para reducir varianza (critic)
+```
+
+---
+
+## Pipeline de entrenamiento DRL
+
+```
+Datos históricos (Alpaca bars / CCXT)
+        │
+        ▼
+  Environment gym-compatible
+  ├── reset() → estado inicial
+  ├── step(action) → nuevo estado, reward, done
+  └── render() → P&L curve, positions
+
+        │  episodios (un episodio = un período histórico)
+        ▼
+  Agente DRL (PPO / SAC)
+  ├── rollout: π(s) → a → r → s'
+  ├── replay buffer (SAC) o batch on-policy (PPO)
+  └── gradient update (policy + value network)
+
+        │  cada N episodios
+        ▼
+  Validación walk-forward
+  ├── WalkForwardRunner en modo DRL
+  ├── Comparar vs XGBoost baseline (DSR, Sharpe)
+  └── Gates: DSR ≥ 0.4, ECE (calibración de valor) ≤ 0.05
+
+        │  si pasa gates
+        ▼
+  ModelRegistry → status "staging"
+  → shadow trading 24h → canary 5% → producción
+```
 
 ---
 
@@ -27,153 +143,85 @@ y operando en **paper trading sobre Alpaca** (run activo: 2026-05-20 → 2026-06
 ```
 quant_bot/
 │
-├── research/                   Núcleo ML: modelos, backtesting, validación
+├── research/
 │   ├── models/
-│   │   ├── zoo.py              LogReg, XGBoost, ResMLP, LSTM
-│   │   ├── walk_forward_runner.py
-│   │   ├── calibration.py      IsotonicCalibrator + TemperatureScaling
-│   │   ├── meta_labeler.py
-│   │   ├── multi_horizon/      trainer, horizon_config, registry_adapter
-│   │   └── drift/              PSI, ECE, KS-test, macro event filter
+│   │   ├── rl_agent.py          Q-learning tabular (MVP activo)
+│   │   ├── zoo.py               ResMLP, LSTM (policy/value backbones)
+│   │   ├── walk_forward_runner.py  Validación temporal anti-leakage
+│   │   ├── calibration.py       Calibración de value estimates
+│   │   └── multi_horizon/       trainer, horizon_config, registry_adapter
 │   ├── pipelines/
-│   │   └── nightly_retrain.py  DAG nocturno (S11) — gates DSR/ECE/collapse
+│   │   └── nightly_retrain.py   DAG nocturno — gates DSR/ECE
 │   ├── cli/
-│   │   ├── train_multi_horizon.py
-│   │   └── run_nightly_retrain.py
-│   ├── features/               engineering, regime_gmm, pca_denoiser, labeling
-│   ├── risk/                   kelly, dynamic_rr, bayesian_sizer
-│   ├── backtesting/            engine bar-level, multi_asset_engine
-│   └── tests/                  anti-leakage, walk-forward, calibración, drift
+│   │   ├── run_nightly_retrain.py
+│   │   └── train_multi_horizon.py
+│   ├── features/                State space: engineering, regime_gmm, pca_denoiser
+│   └── risk/                    kelly, dynamic_rr, bayesian_sizer (externos al agente)
 │
-├── platform/                   Microservicios event-driven (Kafka + Redis)
+├── platform/                    Infraestructura de ejecución
 │   ├── services/
-│   │   ├── execution-engine/   AlpacaAdapter + RiskGate + Reconciler
-│   │   │   ├── app/brokers/_alpaca/
-│   │   │   │   ├── circuit_breaker.py   ← CLOSED→OPEN→HALF_OPEN
-│   │   │   │   ├── retry.py
-│   │   │   │   └── rate_limiter.py
-│   │   │   ├── app/risk_gate.py         ← kill switch step-0
-│   │   │   └── app/reconciler.py        ← 60s loop + kill switch
-│   │   ├── market-intelligence/  OpenBB + Binance WS
-│   │   ├── macroeconomic/        FRED + Sahm Rule + yield curve
-│   │   ├── onchain-analysis/     Whale detection + smart money
-│   │   ├── context-engine/       GMM regime classifier (5 componentes)
-│   │   ├── ml-feature-store/     Feature serving + drift detection
-│   │   └── strategy-orchestrator/ Thompson sampling allocator
-│   ├── monitoring/
-│   │   ├── rules/alpaca.yml    ALERT-004/005/006/007/008
-│   │   └── grafana/dashboards/
-│   └── frontend/               React + TypeScript + Vite + Tailwind
+│   │   ├── execution-engine/
+│   │   │   ├── app/brokers/_alpaca/circuit_breaker.py  ← CLOSED→OPEN→HALF_OPEN
+│   │   │   ├── app/risk_gate.py                        ← kill switch step-0
+│   │   │   └── app/reconciler.py                       ← 60s drift detection
+│   │   ├── strategy-orchestrator/  Thompson sampling entre estrategias
+│   │   ├── ml-feature-store/       State space en tiempo real (Redis)
+│   │   └── context-engine/         Régimen de mercado (GMM 5 componentes)
+│   └── monitoring/
+│       └── rules/alpaca.yml    ALERT-004/005/006/007/008
 │
-├── shared/                     quant_shared — schemas, features, model registry
-│   └── quant_shared/
-│       ├── schemas/            OrderIntent, Fill, Signal (Pydantic v2)
-│       ├── models/registry.py  ModelCard + ModelRegistry
-│       ├── features/           19 features canónicos
-│       └── calendar/           MarketCalendar (RTH/ETH/crypto 24/7)
+├── shared/quant_shared/
+│   ├── schemas/                OrderIntent, Signal (Pydantic v2)
+│   ├── models/registry.py      ModelCard — registra agentes DRL
+│   └── features/               19 features canónicos = state space base
 │
-├── docs/
-│   ├── adr/                    35 ADRs (001–035)
-│   ├── runbooks/               alpaca_outage, position_drift, paper_trading_ops
-│   └── incidents/              DRILL-002/003/004, S12 handoff
-│
-└── tools/
-    ├── briefing/               daily.py + weekly.py (CLI + Discord)
-    └── smoke/                  post-deploy smoke test (22 checks)
+└── docs/
+    ├── adr/                    35 ADRs
+    └── runbooks/               paper_trading_ops, alpaca_outage, position_drift
 ```
 
 ---
 
 ## Arranque rápido
 
-### Research (backtesting + ML)
-
 ```bash
 # Dependencias
 pip install -e shared/
 cd research && pip install -e ".[dev]"
 
-# Tests
-pytest tests/ -v
+# Correr el agente Q-learning actual (simulación)
+python -m research.models.rl_agent
 
-# Dry-run del DAG nocturno (valida entorno sin entrenar)
+# Dry-run del DAG nocturno
 python -m cli.run_nightly_retrain --dry-run
-# Exit 0 + JSON en research/artifacts/runs/ = OK
 
-# Training real (swing + daily, ~2h)
-python -m cli.run_nightly_retrain --horizons swing,daily --n-trials 25
-```
-
-### Platform (microservicios)
-
-```bash
-cd platform
-make up        # Kafka, Redis, Postgres, todos los servicios + frontend
-make monitoring  # Prometheus + Grafana
-```
-
-URLs: dashboard `http://localhost:3000` · Grafana `http://localhost:3001` · Kafka UI `http://localhost:8080`
-
-### Health check rápido
-
-```bash
-# Kill switch status (debe ser false)
+# Platform (ejecución)
+cd platform && make up
 curl -s http://localhost:8080/health | python3 -m json.tool | grep kill_switch
-
-# Briefing semanal
-python -m tools.briefing.weekly --week $(python3 -c "from datetime import date; d=date.today(); print(f'{d.isocalendar()[0]}-W{d.isocalendar()[1]:02d}')")
 ```
 
 ---
 
-## Pipeline de inferencia (happy path)
+## Reglas de riesgo (externas al agente DRL)
 
-```
-Kafka signal (strategy-orchestrator)
-        │
-        ▼
-execution-engine consumer
-  ├── kill_switch? → rechazar
-  ├── RiskGate (8 checks en orden):
-  │     0. kill_switch_active      ← step-0, siempre primero
-  │     1. require_paper
-  │     2. daily_dd (-3% kill)
-  │     3. per_symbol_cap (5%)
-  │     4. per_venue_cap (50%)
-  │     5. extended_hours (LIMIT only)
-  │     6. market_closed
-  │     7. PDT rule
-  │     8. cash_buffer
-  │
-  ├── AlpacaAdapter.submit()
-  │     └── CircuitBreaker (5 fallos/60s → OPEN → 30s → HALF_OPEN)
-  │
-  └── Reconciler (60s loop) → kill switch si drift > threshold
-```
+> El agente DRL **nunca decide** los límites de riesgo — eso es responsabilidad del `RiskGate`.
+
+| Regla | Valor | Dónde |
+|-------|-------|-------|
+| Kill switch | Automático si DD > 3% intraday | `risk_gate.py` step-0 |
+| Per-symbol cap | 5% del equity | `RiskGate` check 3 |
+| Kelly máximo | 0.25 (quarter Kelly) | `bayesian_sizer.py` |
+| Circuit breaker | 5 errores/60s → OPEN | `circuit_breaker.py` |
+| Paper only | `ALPACA_PAPER=true` siempre | `AlpacaConfig` |
 
 ---
 
-## Nightly Retrain DAG (S11)
-
-```bash
-# Gates que debe pasar cada horizonte para promover a "staging":
-# 1. DSR nuevo ≥ 0.40 (floor absoluto)
-# 2. ECE nuevo ≤ 0.05 (calibración)
-# 3. Sin class collapse (> 5% por clase)
-# 4. DSR nuevo ≥ DSR producción × 0.95 (no regresión)
-```
-
-El DAG corre automáticamente via scheduled task (22:00 local). Run logs en `research/artifacts/runs/`.
-
----
-
-## Métricas OOS objetivo
+## Métricas objetivo
 
 | Métrica | Mínimo | Objetivo |
 |---------|--------|----------|
 | Sharpe anual OOS | > 0.8 | > 1.5 |
-| DSR | > 0.4 | > 0.6 |
-| ECE (calibración) | < 0.10 | < 0.05 |
+| DSR (vs XGBoost baseline) | > 0.4 | > 0.6 |
 | Max Drawdown | < 25% | < 15% |
 | Broker latency p99 | — | < 600 ms (ADR-035) |
 | Risk gate p99 | — | < 20 ms (ADR-035) |
@@ -184,36 +232,21 @@ El DAG corre automáticamente via scheduled task (22:00 local). Run logs en `res
 
 | ADR | Decisión |
 |-----|----------|
-| 001 | Walk-forward como única métrica oficial |
-| 003 | Kelly cuarto (0.25) como default |
-| 010 | UTC + Decimal + UUID v7 en toda la plataforma |
-| 028 | Multi-horizon: intraday 5min, swing 4H, daily 1D |
-| 032 | Allocator Thompson: Beta(20,20) priors, decay 0.99/día |
-| 034 | ResMLP reemplaza DeepMLP (post paper run 2026-06-19) |
+| 006 | Q-learning tabular antes de DQN/PPO |
+| 009 | RL **no decide** risk limits — siempre externos |
+| 010 | UTC + Decimal + UUID v7 |
+| 034 | ResMLP como backbone de policy/value network |
 | 035 | SLO: risk gate < 20ms, broker RTT < 600ms |
-
-Lista completa en [`docs/adr/`](docs/adr/).
-
----
-
-## Reglas no negociables
-
-1. **Walk-forward o no existe** — métricas IS son irrelevantes. Solo OOS con `WalkForwardRunner`.
-2. **Calibra antes de filtrar** — ECE < 0.05 verificado antes de usar `predict_proba()`.
-3. **Purge + embargo obligatorio** — sin esto el backtest miente por leakage temporal.
-4. **Kelly fraccional ≤ 0.25** — nunca Kelly completo en producción.
-5. **Paper trading mínimo 30 días** antes de capital real, con aprobación humana explícita.
-6. **`n_trials` honesto en DSR** — si optimizaste 100 combinaciones, `n_trials=100`.
-7. **No commitear secrets** — API keys nunca en código ni `.env` commiteado.
 
 ---
 
 ## Referencias
 
+- Sutton & Barto (2018). *Reinforcement Learning: An Introduction*. MIT Press.
 - López de Prado, M. (2018). *Advances in Financial Machine Learning*. Wiley.
+- Schulman et al. (2017). "Proximal Policy Optimization Algorithms". *arXiv*.
+- Haarnoja et al. (2018). "Soft Actor-Critic". *ICML*.
 - Bailey, D. & López de Prado, M. (2014). "The Deflated Sharpe Ratio". *JPM*.
-- Guo, C. et al. (2017). "On Calibration of Modern Neural Networks". *ICML*.
-- Shazeer, N. (2020). "GLU Variants Improve Transformer". *arXiv*.
 
 ---
 
