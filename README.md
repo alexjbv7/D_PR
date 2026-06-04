@@ -182,15 +182,72 @@ quant_bot/
 
 ---
 
+## Stack de librerías
+
+### Shared (`quant-shared`)
+| Librería | Versión | Uso |
+|----------|---------|-----|
+| `numpy` | ≥1.26 | Cómputo numérico base |
+| `pandas` | ≥2.0 | DataFrames de features y OHLCV |
+| `pydantic` | ≥2.0 | Schemas de órdenes, señales, eventos Kafka |
+| `pandas_market_calendars` | ≥4.4,<5 | Calendario de mercado RTH/ETH/holidays |
+
+### Research — ML / DRL (`quant-research`)
+| Librería | Versión | Uso |
+|----------|---------|-----|
+| `torch` | ≥2.0 | Redes neuronales DRL (ResMLP, DQN, PPO, SAC) |
+| `gymnasium` | ≥0.29 | Environment DRL gym-compatible |
+| `stable-baselines3` | ≥2.3 | Algoritmos DRL (DQN, PPO wrapper) |
+| `scikit-learn` | ≥1.4 | Calibración isotónica, PCA, métricas |
+| `xgboost` | ≥2.0 | Baseline de comparación vs agente DRL |
+| `lightgbm` | ≥4.0 | Alternativa gradient boosting |
+| `optuna` | ≥3.0 | Hyperparameter tuning (policy, reward, backbone) |
+| `scipy` | ≥1.11 | Estadística (PSR, DSR, KS-test) |
+| `statsmodels` | ≥0.14 | ARIMA, cointegración (stat-arb) |
+| `shap` | ≥0.44 | Interpretabilidad de features y política |
+| `joblib` | ≥1.3 | Paralelismo en walk-forward |
+| `alpaca-py` | ≥0.40 | Broker Alpaca (paper + live) |
+| `ccxt` | ≥4.0 | Exchanges crypto (Binance, Bybit, Kraken) |
+| `yfinance` | ≥0.2.50 | Datos históricos Yahoo Finance |
+| `pyarrow` | ≥14.0 | Parquet (feature store offline) |
+| `streamlit` | ≥1.35 | Dashboard de research |
+| `plotly` | ≥5.0 | Visualizaciones interactivas |
+| `matplotlib` / `seaborn` | ≥3.7 / ≥0.13 | Gráficos estáticos |
+| `python-dotenv` | ≥1.0 | Variables de entorno (.env) |
+| `pyyaml` | ≥6.0 | Configuración YAML |
+
+### Dev / Testing
+| Librería | Uso |
+|----------|-----|
+| `pytest` + `pytest-asyncio` | Tests unitarios e integración |
+| `pytest-benchmark` | Benchmarks de latencia |
+| `ruff` | Linter + formatter |
+| `mypy` | Tipado estático |
+
+### Platform (microservicios)
+| Librería | Uso |
+|----------|-----|
+| `fastapi` + `uvicorn` | APIs REST de los 8 microservicios |
+| `aiokafka` | Kafka consumer/producer async |
+| `redis` / `aioredis` | Feature store online, kill switch |
+| `asyncpg` | PostgreSQL / TimescaleDB async |
+| `discord.py` | Bot Discord (alertas, briefings) |
+| `mcp` | Model Context Protocol (Cursor integration) |
+| `prometheus-client` | Métricas (ALERT-004/005/006/007/008) |
+
+---
+
 ## Arranque rápido
 
 ```bash
-# Dependencias
+# Dependencias base
 pip install -e shared/
 cd research && pip install -e ".[dev]"
+pip install torch --index-url https://download.pytorch.org/whl/cpu  # CPU local
+pip install gymnasium stable-baselines3
 
 # Correr el agente Q-learning actual (simulación)
-python -m research.models.rl_agent
+python -m models.rl_agent
 
 # Dry-run del DAG nocturno
 python -m cli.run_nightly_retrain --dry-run

@@ -45,7 +45,14 @@ load_dotenv()
 _ET = ZoneInfo("America/New_York")
 
 BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
-GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
+GUILD_ID   = int(os.getenv("DISCORD_GUILD_ID", "1506893616923279360"))
+
+# Epsilon Eridani server — canales conocidos
+CHANNEL_GENERAL = int(os.getenv("DISCORD_CHANNEL_GENERAL", "1506893618416189522"))
+CHANNEL_GROKY   = int(os.getenv("DISCORD_CHANNEL_GROKY",   "1506894386418417836"))
+
+# Canal por defecto para notificaciones del bot (briefings, alertas)
+DEFAULT_NOTIFY_CHANNEL = CHANNEL_GROKY   # #groky🐊 — canal del bot
 
 # Discord client (read/write)
 intents = discord.Intents.default()

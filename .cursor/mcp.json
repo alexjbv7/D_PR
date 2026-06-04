@@ -1,13 +1,15 @@
 {
-    "mcpServers": {
-      "discord": {
-        "command": "python",
-        "args": ["-m", "tools.mcp.discord_mcp"],
-        "cwd": "C:\\Users\\alexj\\OneDrive\\Desktop\\quant_bot",
-        "env": {
-          "DISCORD_BOT_TOKEN": "${DISCORD_BOT_TOKEN}",
-          "DISCORD_GUILD_ID": "${DISCORD_GUILD_ID}"
-        }
+  "mcpServers": {
+    "discord": {
+      "command": "python3",
+      "args": ["-m", "tools.mcp.discord_mcp"],
+      "cwd": "/workspace",
+      "env": {
+        "DISCORD_BOT_TOKEN": "${DISCORD_BOT_TOKEN}",
+        "DISCORD_GUILD_ID": "1506893616923279360",
+        "DISCORD_CHANNEL_GENERAL": "1506893618416189522",
+        "DISCORD_CHANNEL_GROKY": "1506894386418417836"
       }
     }
   }
+}

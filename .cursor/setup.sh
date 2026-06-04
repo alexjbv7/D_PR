@@ -51,6 +51,12 @@ echo "▶ Installing DRL dependencies..."
 pip install gymnasium stable-baselines3 --quiet
 echo "  ✅ DRL deps installed"
 
+# ── 6. Discord MCP (notificaciones al servidor Epsilon Eridani) ───
+echo ""
+echo "▶ Installing Discord MCP dependencies..."
+pip install "discord.py>=2.0" mcp python-dotenv --quiet
+echo "  ✅ Discord MCP deps installed"
+
 # ── 6. Verify critical imports ───────────────────────────────────
 echo ""
 echo "▶ Verifying imports..."
