@@ -57,13 +57,22 @@ def test_dry_run_returns_zero():
     assert train_drl._run(_args(dry_run=True)) == 0
 
 
-def test_invalid_train_frac_raises():
-    # train_frac too extreme leaves one side without a full episode.
+def test_insufficient_data_after_split_raises(monkeypatch):
+    # Pin the dataset to a small fixed size so the split leaves the eval slice
+    # below one full episode; the anti-leakage guard must reject it.
+    small = train_drl._build_stub_data(n_bars=260, as_of=date(2026, 6, 1), seed=1)
+    monkeypatch.setattr(train_drl, "_build_stub_data", lambda *a, **k: small)
     with pytest.raises(ValueError):
-        train_drl._split_envs(_args(train_frac=0.999))
+        train_drl._split_envs(_args(train_frac=0.95))
 
 
-@pytest.mark.slow
+def test_checkpoint_default_is_inside_repo():
+    # Regression: default ckpt dir must live under research/artifacts, not above it.
+    assert train_drl._RESEARCH.name == "research"
+    assert (train_drl._RESEARCH / "artifacts").parent == train_drl._RESEARCH
+
+
 def test_dqn_short_run_completes(tmp_path):
+    pytest.importorskip("torch")  # skip cleanly where torch is absent
     code = train_drl._run(_args(episodes=2, checkpoint_dir=str(tmp_path)))
     assert code in (0, 2)  # trained; edge may or may not be positive on noise

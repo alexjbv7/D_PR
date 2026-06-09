@@ -52,9 +52,12 @@ import time
 from datetime import date
 from pathlib import Path
 
-# Ensure research/ and shared/ are importable (mirrors train_multi_horizon.py)
-_REPO = Path(__file__).parents[3]
-for _p in [str(_REPO / "research"), str(_REPO / "shared")]:
+# Ensure research/ and shared/ are importable.
+# File lives at <repo>/research/cli/train_drl.py, so:
+#   parents[1] = <repo>/research   parents[2] = <repo>
+_RESEARCH = Path(__file__).parents[1]
+_REPO = _RESEARCH.parent
+for _p in [str(_RESEARCH), str(_REPO / "shared")]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -153,7 +156,7 @@ def _split_envs(args: argparse.Namespace) -> tuple[TradingEnvironment, TradingEn
 
 
 def _run(args: argparse.Namespace) -> int:
-    ckpt_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else _REPO / "research" / "artifacts" / "drl" / args.algo
+    ckpt_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else _RESEARCH / "artifacts" / "drl" / args.algo
 
     logger.info("algo=%s seed=%d device=%s train_frac=%.2f as_of=%s",
                 args.algo, args.seed, args.device, args.train_frac, args.as_of)
