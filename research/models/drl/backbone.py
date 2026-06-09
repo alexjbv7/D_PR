@@ -2,6 +2,8 @@
 Shared ResMLP backbone for DRL agents (ADR-038).
 
 TradingResMLP maps tabular market state to a fixed embedding used by DQN/PPO/SAC heads.
+
+ResBlock is imported from models.nn_layers (shared with zoo.ResMLPClassifier per ADR-034).
 """
 
 from __future__ import annotations
@@ -10,6 +12,8 @@ import math
 
 import torch
 import torch.nn as nn
+
+from models.nn_layers import ResBlock  # shared with ResMLPClassifier (ADR-034)
 
 
 def init_weights(module: nn.Module) -> None:
@@ -25,23 +29,6 @@ def init_weights(module: nn.Module) -> None:
         nn.init.orthogonal_(module.weight, gain=math.sqrt(2.0))
         if module.bias is not None:
             nn.init.zeros_(module.bias)
-
-
-class ResBlock(nn.Module):
-    """Residual block with SwiGLU and pre-activation LayerNorm."""
-
-    def __init__(self, dim: int, dropout: float = 0.1) -> None:
-        super().__init__()
-        self.norm = nn.LayerNorm(dim)
-        self.gate = nn.Linear(dim, dim * 2)
-        self.proj = nn.Linear(dim, dim)
-        self.drop = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.norm(x)
-        gate, linear = self.gate(h).chunk(2, dim=-1)
-        h = self.proj(torch.sigmoid(gate) * linear)
-        return x + self.drop(h)
 
 
 class TradingResMLP(nn.Module):

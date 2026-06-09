@@ -151,15 +151,24 @@ def _xgb_search_space(trial: Any) -> dict[str, Any]:
     }
 
 
-def _mlp_search_space(trial: Any) -> dict[str, Any]:
-    n_layers = trial.suggest_int("n_layers", 2, 4)
-    hidden_dim = trial.suggest_int("hidden_dim", 64, 512, step=64)
+def _res_mlp_search_space(trial: Any) -> dict[str, Any]:
+    """
+    Optuna search space for ResMLPClassifier (ADR-034).
+
+    Replaces the old _mlp_search_space (DeepMLP) with ResBlock-aware params.
+    n_blocks replaces n_layers; hidden_dim is uniform across all blocks.
+    """
     return {
-        "hidden_dims": [hidden_dim] * n_layers,
-        "dropout":     trial.suggest_float("dropout", 0.0, 0.5),
-        "lr":          trial.suggest_float("lr", 1e-4, 1e-2, log=True),
-        "batch_size":  trial.suggest_categorical("batch_size", [32, 64, 128]),
-        "epochs":      trial.suggest_int("epochs", 20, 100, step=10),
+        "hidden_dim":    trial.suggest_int("hidden_dim", 64, 512, step=64),
+        "n_blocks":      trial.suggest_int("n_blocks", 2, 5),
+        "dropout":       trial.suggest_float("dropout", 0.0, 0.4),
+        "learning_rate": trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True),
+        "weight_decay":  trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True),
+        "batch_size":    trial.suggest_categorical("batch_size", [64, 128, 256]),
+        "epochs":        trial.suggest_int("epochs", 30, 120, step=15),
+        "patience":      15,
+        "device":        "cpu",
+        "random_state":  42,
     }
 
 
@@ -357,7 +366,7 @@ class MultiHorizonTrainer:
             if cfg.model_name == "xgb":
                 params = _xgb_search_space(trial)
             else:
-                params = _mlp_search_space(trial)
+                params = _res_mlp_search_space(trial)
 
             inner_cfg = self._build_wf_config(cfg, params, inner_embargo)
             # Reduce splits for speed inside hyperopt
@@ -501,7 +510,7 @@ class MultiHorizonTrainer:
             use_class_weights=True,
             track_importance=True,
             xgb_params=xgb_p,
-            model_class=("xgboost" if cfg.model_name == "xgb" else "deep_mlp"),
+            model_class=("xgboost" if cfg.model_name == "xgb" else "res_mlp"),  # ADR-034
         )
         if mlp_p and hasattr(wf_cfg, "mlp_params"):
             wf_cfg.mlp_params = mlp_p
@@ -683,7 +692,7 @@ class MultiHorizonTrainer:
             params["n_jobs"] = 1
 
         model = get_model(
-            "xgboost" if cfg.model_name == "xgb" else "deep_mlp",
+            "xgboost" if cfg.model_name == "xgb" else "res_mlp",  # ADR-034
             **params,
         )
         model.fit(X, y)
@@ -815,16 +824,16 @@ def _bar_size_minutes(bar_size: str) -> float:
     """Convert pandas-style bar_size string to minutes."""
     mapping: dict[str, float] = {
         "5min": 5.0,
-        "5T": 5.0,
+        "5T":   5.0,
         "15min": 15.0,
-        "1h": 60.0,
-        "1H": 60.0,
-        "4H": 240.0,
-        "4h": 240.0,
-        "1D": 390.0,   # one RTH session
-        "1d": 390.0,
+        "1h":   60.0,
+        "1H":   60.0,
+        "4H":   240.0,
+        "4h":   240.0,
+        "1D":   390.0,
+        "1d":   390.0,
     }
     if bar_size in mapping:
         return mapping[bar_size]
-    logger.warning("Unknown bar_size '%s', defaulting to 60 minutes.", bar_size)
+    logger.warning("Unknown bar_size '', defaulting to 60 minutes.", bar_size)
     return 60.0

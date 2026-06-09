@@ -748,16 +748,296 @@ class DeepMLPClassifier(BaseModel):
             return pd.Series(np.zeros(len(self.feature_names_)), index=self.feature_names_)
 
 
+
+# ============================================================================
+# 5. RESMLP — Deep tabular MLP with residual connections (ADR-034)
+#    Replaces DeepMLP in MultiHorizonTrainer.
+#    Architecture: Linear(in, hidden) → [ResBlock×N] → LayerNorm → Linear(hidden, classes)
+#    ResBlock: LayerNorm → SwiGLU → Linear → Dropout → skip (from nn_layers.py)
+#    Calibration cascade: TemperatureScaling (fit on val logits) → IsotonicCalibrator.
+#    Use when:
+#      - XGBoost already yields Sharpe > 0.5 OOS (signal exists)
+#      - > 5 K training samples per class
+#      - GPU preferred but CPU-compatible
+# ============================================================================
+
+class ResMLPClassifier(BaseModel):
+    """
+    Residual MLP classifier for trading signals (ADR-034).
+
+    Architecture
+    ------------
+    Input -> Linear(in, hidden) -> [ResBlock(hidden, dropout) x n_blocks]
+          -> LayerNorm -> Linear(hidden, n_classes)
+
+    ResBlock: pre-activation LayerNorm + SwiGLU gate + skip connection.
+    Calibration: TemperatureScaling (logit-level) -> IsotonicCalibrator (proba-level).
+
+    Parameters
+    ----------
+    hidden_dim : int
+        Embedding dimension for all residual blocks (default 256).
+    n_blocks : int
+        Number of residual blocks (2-6).
+    dropout : float
+        Dropout inside each ResBlock.
+    learning_rate : float
+    weight_decay : float
+    batch_size : int
+    epochs : int
+    patience : int
+        Early stopping patience.
+    device : str
+    random_state : int
+
+    Examples
+    --------
+    >>> import pandas as pd, numpy as np
+    >>> X = pd.DataFrame(np.random.randn(500, 10))
+    >>> y = pd.Series(np.random.choice([-1, 0, 1], 500))
+    >>> m = ResMLPClassifier(hidden_dim=64, n_blocks=2, epochs=5)
+    >>> m.fit(X, y)
+    >>> m.predict_proba(X).shape[1]
+    3
+    """
+
+    name = "res_mlp"
+
+    DEFAULT_PARAMS: dict = {
+        "hidden_dim":    256,
+        "n_blocks":      3,
+        "dropout":       0.1,
+        "learning_rate": 1e-3,
+        "weight_decay":  1e-4,
+        "batch_size":    256,
+        "epochs":        100,
+        "patience":      15,
+        "device":        "cpu",
+        "random_state":  42,
+    }
+
+    def __init__(self, **params) -> None:
+        merged = {**self.DEFAULT_PARAMS, **params}
+        super().__init__(**merged)
+        self.scaler = RobustScaler()
+        self.label_map_: dict | None = None
+        self.inv_label_map_: dict | None = None
+        self._temp_scaling = None
+        self._calibrator = None
+
+    def _build_net(self, input_dim: int, n_classes: int):
+        try:
+            import torch.nn as nn
+        except ImportError:
+            raise ImportError("PyTorch required for ResMLPClassifier.")
+        from models.nn_layers import ResBlock
+
+        hidden = self.params["hidden_dim"]
+        layers = [nn.Linear(input_dim, hidden)]
+        for _ in range(self.params["n_blocks"]):
+            layers.append(ResBlock(hidden, self.params["dropout"]))
+        layers.append(nn.LayerNorm(hidden))
+        layers.append(nn.Linear(hidden, n_classes))
+        return nn.Sequential(*layers)
+
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        sample_weight=None,
+        eval_set=None,
+        all_classes=None,
+    ) -> "ResMLPClassifier":
+        try:
+            import torch
+            import torch.nn as nn
+            from torch.utils.data import DataLoader, TensorDataset
+        except ImportError:
+            raise ImportError("PyTorch required for ResMLPClassifier.")
+
+        torch.manual_seed(self.params["random_state"])
+        self.feature_names_ = list(X.columns)
+        X_scaled = self.scaler.fit_transform(X.values).astype(np.float32)
+
+        if all_classes is not None:
+            unique_labels = sorted(all_classes)
+        else:
+            unique_labels = sorted(np.unique(y))
+        self.label_map_ = {lab: i for i, lab in enumerate(unique_labels)}
+        self.inv_label_map_ = {i: lab for lab, i in self.label_map_.items()}
+        y_mapped = pd.Series(y).map(self.label_map_).values.astype(np.int64)
+
+        if pd.isna(y_mapped).any():
+            unexpected = set(np.unique(y)) - set(unique_labels)
+            raise ValueError(f"Clases en y no esperadas: {unexpected}")
+
+        n_classes = len(unique_labels)
+        device = torch.device(self.params["device"])
+        self.model = self._build_net(X_scaled.shape[1], n_classes).to(device)
+
+        optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=self.params["learning_rate"],
+            weight_decay=self.params["weight_decay"],
+        )
+        class_counts = np.bincount(y_mapped, minlength=n_classes).astype(float)
+        class_counts = np.where(class_counts == 0, 1.0, class_counts)
+        class_weights = torch.FloatTensor(len(y_mapped) / (n_classes * class_counts)).to(device)
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+
+        X_t = torch.FloatTensor(X_scaled).to(device)
+        y_t = torch.LongTensor(y_mapped).to(device)
+        if sample_weight is not None:
+            w_t = torch.FloatTensor(np.asarray(sample_weight, dtype=np.float32)).to(device)
+            dataset = TensorDataset(X_t, y_t, w_t)
+        else:
+            dataset = TensorDataset(X_t, y_t)
+        loader = DataLoader(dataset, batch_size=self.params["batch_size"], shuffle=True)
+
+        val_loader = None
+        X_val_scaled = None
+        y_val_mapped_arr = None
+        if eval_set is not None:
+            X_val, y_val = eval_set
+            X_val_scaled = self.scaler.transform(X_val.values).astype(np.float32)
+            y_val_mapped_arr = pd.Series(y_val).map(self.label_map_).values.astype(np.int64)
+            val_loader = DataLoader(
+                TensorDataset(
+                    torch.FloatTensor(X_val_scaled).to(device),
+                    torch.LongTensor(y_val_mapped_arr).to(device),
+                ),
+                batch_size=self.params["batch_size"],
+            )
+
+        best_val_loss = float("inf")
+        patience_counter = 0
+        best_state = None
+
+        for epoch in range(self.params["epochs"]):
+            self.model.train()
+            for batch in loader:
+                optimizer.zero_grad()
+                if len(batch) == 3:
+                    xb, yb, wb = batch
+                    logits = self.model(xb)
+                    loss = (nn.functional.cross_entropy(logits, yb, reduction="none") * wb).mean()
+                else:
+                    xb, yb = batch
+                    logits = self.model(xb)
+                    loss = criterion(logits, yb)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                optimizer.step()
+
+            if val_loader is not None:
+                self.model.eval()
+                val_loss = 0.0
+                with torch.no_grad():
+                    for xv, yv in val_loader:
+                        val_loss += criterion(self.model(xv), yv).item()
+                val_loss /= len(val_loader)
+                if val_loss < best_val_loss - 1e-5:
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                    best_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                else:
+                    patience_counter += 1
+                    if patience_counter >= self.params["patience"]:
+                        logger.info("ResMLPClassifier early stopping at epoch %d", epoch)
+                        break
+
+        if best_state is not None:
+            self.model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
+
+        if eval_set is not None and X_val_scaled is not None:
+            self._fit_temperature_scaling(X_val_scaled, y_val_mapped_arr, device)
+
+        return self
+
+    def _fit_temperature_scaling(self, X_val_scaled, y_val_mapped, device) -> None:
+        import torch
+        from models.nn_layers import TemperatureScaling
+        self.model.eval()
+        with torch.no_grad():
+            logits_val = self.model(torch.FloatTensor(X_val_scaled).to(device)).cpu()
+        labels_val = torch.LongTensor(y_val_mapped)
+        self._temp_scaling = TemperatureScaling()
+        self._temp_scaling.fit(logits_val, labels_val)
+
+    def _raw_logits(self, X: pd.DataFrame) -> np.ndarray:
+        import torch
+        X_arr = X[self.feature_names_].values if isinstance(X, pd.DataFrame) else X
+        X_scaled = self.scaler.transform(X_arr).astype(np.float32)
+        device = torch.device(self.params["device"])
+        self.model.eval()
+        with torch.no_grad():
+            logits = self.model(torch.FloatTensor(X_scaled).to(device))
+        return logits.cpu().numpy()
+
+    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
+        import torch
+        return torch.softmax(torch.FloatTensor(self._raw_logits(X)), dim=1).numpy()
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        import torch
+        logits = torch.FloatTensor(self._raw_logits(X))
+        if self._temp_scaling is not None and self._temp_scaling.is_fitted:
+            logits = self._temp_scaling(logits)
+        proba = torch.softmax(logits, dim=1).numpy()
+        if self._calibrator is not None and self._calibrator.is_fitted:
+            proba = self._calibrator.predict_proba_from_raw(proba)
+        return proba
+
+    def calibrate(self, X_calib, y_calib, method: str = "isotonic") -> "ResMLPClassifier":
+        if self.model is None:
+            raise RuntimeError("Call .fit() before .calibrate()")
+        if self.label_map_ is None:
+            raise RuntimeError("Model has no label_map_.")
+        from models.calibration import IsotonicCalibrator
+        y_mapped = pd.Series(y_calib).map(self.label_map_).values
+        if pd.isna(y_mapped).any():
+            unexpected = set(np.unique(y_calib)) - set(self.label_map_.keys())
+            raise ValueError(f"Labels in y_calib not seen in training: {unexpected}")
+        raw_proba = self.predict_proba_raw(X_calib)
+        self._calibrator = IsotonicCalibrator(method=method)
+        self._calibrator.fit_from_proba(raw_proba, y_mapped.astype(int))
+        logger.info("ResMLPClassifier calibrated (%s) on %d samples.", method, len(X_calib))
+        return self
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        proba = self.predict_proba(X)
+        idx = np.argmax(proba, axis=1)
+        return np.array([self.inv_label_map_[int(i)] for i in idx])
+
+    @property
+    def is_calibrated(self) -> bool:
+        ts_ok = self._temp_scaling is not None and self._temp_scaling.is_fitted
+        iso_ok = self._calibrator is not None and self._calibrator.is_fitted
+        return ts_ok or iso_ok
+
+    def feature_importance(self) -> pd.Series:
+        if self.model is None or self.feature_names_ is None:
+            raise RuntimeError("Model not trained")
+        try:
+            import torch
+            first_layer = list(self.model.parameters())[0]
+            importance = first_layer.abs().mean(dim=0).detach().cpu().numpy()
+            return pd.Series(importance, index=self.feature_names_).sort_values(ascending=False)
+        except Exception:
+            return pd.Series(np.zeros(len(self.feature_names_)), index=self.feature_names_)
+
+
 # ============================================================================
 # FACTORY
 # ============================================================================
 
 def get_model(name: str, **kwargs) -> BaseModel:
     registry = {
-        'logistic':  LogisticBaseline,
-        'xgboost':   XGBoostClassifier,
-        'lstm':      LSTMClassifier,
-        'deep_mlp':  DeepMLPClassifier,
+        "logistic":  LogisticBaseline,
+        "xgboost":   XGBoostClassifier,
+        "lstm":      LSTMClassifier,
+        "deep_mlp":  DeepMLPClassifier,
+        "res_mlp":   ResMLPClassifier,
     }
     if name not in registry:
         raise ValueError(f"Modelo '{name}' no registrado. Disponibles: {list(registry.keys())}")

@@ -322,20 +322,22 @@ class WalkForwardConfig:
 
     # Selector de modelo primario (CS229 DL cheatsheet)
     # 'xgboost'  : XGBoostClassifier (default, más robusto para finanzas)
-    # 'deep_mlp' : DeepMLPClassifier (BatchNorm+LeakyReLU+Dropout+Adam)
+    # 'deep_mlp' : DeepMLPClassifier (BatchNorm+LeakyReLU+Dropout+Adam) — legacy baseline
+    # 'res_mlp'  : ResMLPClassifier  (ResBlock+SwiGLU+LayerNorm, ADR-034) — reemplaza deep_mlp
     # 'logistic' : LogisticBaseline  (baseline)
     # 'lstm'     : LSTMClassifier    (solo con >100K barras y GPU)
     model_class: str = "xgboost"
 
-    # Parámetros para DeepMLP (solo si model_class='deep_mlp')
+    # Parámetros para DeepMLP/ResMLPClassifier (solo si model_class='deep_mlp'|'res_mlp')
     mlp_params: dict = field(default_factory=lambda: {
-        "hidden_dims":   [128, 64, 32],
-        "dropout":       0.3,
+        "hidden_dim":    256,
+        "n_blocks":      3,
+        "dropout":       0.1,
         "learning_rate": 1e-3,
         "weight_decay":  1e-4,
         "batch_size":    256,
         "epochs":        100,
-        "patience":      10,
+        "patience":      15,
         "device":        "cpu",
     })
 
@@ -659,9 +661,9 @@ class WalkForwardRunner:
 
         if model_cls == "xgboost":
             model = get_model("xgboost", **cfg.xgb_params)
-        elif model_cls == "deep_mlp":
-            model = get_model("deep_mlp", **cfg.mlp_params)
-        elif model_cls in ("logistic", "deep_mlp", "lstm"):
+        elif model_cls in ("deep_mlp", "res_mlp"):
+            model = get_model(model_cls, **cfg.mlp_params)
+        elif model_cls in ("logistic", "lstm"):
             model = get_model(model_cls)
         else:
             logger.warning(
@@ -684,8 +686,8 @@ class WalkForwardRunner:
         if model_cls == "xgboost":
             model.fit(X_fit, y_fit, all_classes=all_classes,
                       sample_weight=sample_weight)
-        elif model_cls == "deep_mlp":
-            # DeepMLP acepta eval_set para early stopping (usa calib como val)
+        elif model_cls in ("deep_mlp", "res_mlp"):
+            # MLP/ResMLP: eval_set para early stopping y (res_mlp) TemperatureScaling
             model.fit(X_fit, y_fit, sample_weight=sample_weight,
                       eval_set=(X_calib, y_calib), all_classes=all_classes)
         else:
