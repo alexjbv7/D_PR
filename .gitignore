@@ -84,3 +84,7 @@ research/plots/*.png
 research/data/alpaca_bars/
 research/artifacts/
 pytest_fail.txt
+
+research/data/alpaca_bars/
+research/artifacts/
+pytest_fail.txt
