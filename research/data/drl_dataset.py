@@ -11,10 +11,14 @@ primitives to avoid silently-zero features.
 Anti-leakage
 ------------
 - Technical features are causal (rolling windows over past data only).
-- The GMM regime model is fitted ONLY on the training slice (``train_frac``),
+- The GMM regime model is fitted ONLY on a caller-supplied training slice,
   then applied to the full series. The evaluation slice never participates in
-  the regime fit. This mirrors the train/eval split the driver applies later,
-  so the regime boundary is consistent and leakage-free.
+  the regime fit.
+- Single split (``build_drl_dataset`` + ``train_frac``): the GMM sees the
+  first ``train_frac`` of the clean bars. Mirrors the driver's train/eval cut.
+- Walk-forward (``build_env_frame`` + ``gmm_train_idx``, ADR-040): the GMM is
+  re-fitted PER FOLD on exactly the train bars of that fold. Fitting it once
+  on a global ``train_frac`` would leak future folds into earlier regimes.
 
 The Alpaca fetch is isolated in ``_fetch_ohlcv`` so tests can monkeypatch it
 (no network / no credentials required for unit tests).
@@ -66,9 +70,30 @@ def _fetch_ohlcv(
     with ingestor:
         ingestor.ingest([symbol], timeframe=timeframe, start=start, end=end)
         df = ingestor._load_df(symbol, timeframe)
+        # Incremental ingest only moves the watermark FORWARD. If the cached
+        # parquet starts after the requested start (e.g. cache built recently
+        # but a multi-year walk-forward is requested), backfill once from
+        # `start` with incremental=False so history is actually available.
+        if df is not None and not df.empty and start is not None:
+            first = df.index.min()
+            if first.tz is None:
+                first = first.tz_localize("UTC")
+            if first > pd.Timestamp(start) + pd.Timedelta(days=7):
+                logger.info(
+                    "drl_dataset backfill: cache starts %s > requested %s — "
+                    "re-ingesting full history (incremental=False)",
+                    first.date(), start.date(),
+                )
+                ingestor.ingest(
+                    [symbol], timeframe=timeframe, start=start, end=end,
+                    incremental=False,
+                )
+                df = ingestor._load_df(symbol, timeframe)
     if df is None or df.empty:
         raise RuntimeError(f"Alpaca returned no bars for {symbol} [{start}..{end}]")
-    return df[["open", "high", "low", "close", "volume"]].sort_index()
+    df = df[["open", "high", "low", "close", "volume"]].sort_index()
+    # The parquet stores ALL cached history; honor the requested window.
+    return df.loc[pd.Timestamp(start):pd.Timestamp(end)]
 
 
 def _market_features(ohlcv: pd.DataFrame) -> pd.DataFrame:
@@ -96,20 +121,38 @@ def _market_features(ohlcv: pd.DataFrame) -> pd.DataFrame:
 
 def _regime_features(
     ohlcv: pd.DataFrame,
-    split_idx: int,
+    train_idx: "int | np.ndarray",
 ) -> pd.DataFrame:
     """
-    Fit the GMM on the TRAIN slice [:split_idx] only, transform the full series.
+    Fit the GMM ONLY on the train bars, then transform the full series.
 
-    Returns the 7 regime columns the env expects. regime_prob_3/4 are zero
-    (only 3 components); regime_stability is derived from entropy; vol_regime
-    is a bounded realized-vol indicator.
+    Parameters
+    ----------
+    ohlcv : pd.DataFrame
+        Clean (post-warmup) OHLCV frame.
+    train_idx : int or np.ndarray
+        Positional rows of ``ohlcv`` the GMM may see during ``fit``. An int
+        ``k`` is shorthand for ``arange(k)`` (single-split case). For
+        walk-forward (ADR-040) pass the exact train indices of the fold.
+
+    Returns
+    -------
+    pd.DataFrame
+        The 7 regime columns the env expects. regime_prob_3/4 are zero
+        (only 3 components); regime_stability is derived from entropy;
+        vol_regime is a bounded realized-vol indicator. The transform is
+        causal per-bar (rolling lookback only), so computing it over the
+        full series does not leak test data into the GMM fit.
     """
     c, h, l = ohlcv["close"], ohlcv["high"], ohlcv["low"]
     atr_raw = _atr(h, l, c, 14)
 
+    if isinstance(train_idx, (int, np.integer)):
+        train_idx = np.arange(int(train_idx))
+    train_idx = np.asarray(train_idx, dtype=int)
+
     det = GMMRegimeDetector(GMMRegimeConfig(n_components=_N_REGIMES))
-    det.fit(c.iloc[:split_idx], atr_raw.iloc[:split_idx])   # TRAIN ONLY — anti-leakage
+    det.fit(c.iloc[train_idx], atr_raw.iloc[train_idx])   # TRAIN ONLY — anti-leakage
     gmm = det.transform(c, atr_raw)
 
     r = pd.DataFrame(index=ohlcv.index)
@@ -121,6 +164,137 @@ def _regime_features(
     vol = np.log(c / c.shift(1)).rolling(20).std()
     r["vol_regime"] = np.tanh(zscore(vol, 60).fillna(0.0))
     return r
+
+
+def fetch_ohlcv_frame(
+    symbol: str,
+    start: "str | datetime",
+    end: "str | datetime",
+    *,
+    timeframe: str = "1d",
+    feed: str = "iex",
+) -> pd.DataFrame:
+    """
+    Fetch raw OHLCV bars for ``symbol`` as a UTC-indexed DataFrame.
+
+    Thin public wrapper over ``_fetch_ohlcv`` (which tests monkeypatch) that
+    normalizes timestamps. This is the raw input expected by
+    ``models.drl.dsr_gate`` (ADR-040), which builds features per fold.
+
+    Parameters
+    ----------
+    symbol : str
+        e.g. "SPY", "AAPL", or "BTC/USD".
+    start, end : str or datetime
+        ISO date strings or datetimes (interpreted as UTC).
+    timeframe : str
+        Alpaca timeframe ("1d", "4h", ...). Default daily.
+    feed : str
+        Alpaca data feed ("iex" free, "sip" paid).
+
+    Returns
+    -------
+    pd.DataFrame
+        UTC DatetimeIndex, columns = [open, high, low, close, volume].
+    """
+    start_dt = pd.Timestamp(start, tz="UTC").to_pydatetime()
+    end_dt = pd.Timestamp(end, tz="UTC").to_pydatetime()
+    ohlcv = _fetch_ohlcv(symbol, start_dt, end_dt, timeframe, feed)
+    if str(ohlcv.index.tz) != "UTC":
+        ohlcv.index = ohlcv.index.tz_convert("UTC")
+    return ohlcv
+
+
+def clean_close_series(ohlcv: pd.DataFrame) -> pd.Series:
+    """
+    Close prices restricted to the clean (post-warmup) bars.
+
+    Positionally aligned with ``build_env_frame`` output — baselines that
+    only need prices (e.g. buy-and-hold in the ADR-040 gate) can index this
+    with the same fold indices without fitting any regime model.
+
+    Parameters
+    ----------
+    ohlcv : pd.DataFrame
+        Raw OHLCV frame (columns open/high/low/close/volume).
+
+    Returns
+    -------
+    pd.Series
+        ``close`` over the clean bars (length == ``n_clean_bars(ohlcv)``).
+    """
+    market = _market_features(ohlcv)
+    return ohlcv.loc[market.notna().all(axis=1), "close"]
+
+
+def n_clean_bars(ohlcv: pd.DataFrame) -> int:
+    """
+    Number of bars that survive the feature warmup trim.
+
+    Walk-forward splitters (ADR-040) must be sized on the CLEAN bar count,
+    because ``build_env_frame`` drops the first ~80 bars of rolling-window
+    warmup before fold indices apply.
+
+    Parameters
+    ----------
+    ohlcv : pd.DataFrame
+        Raw OHLCV frame (columns open/high/low/close/volume).
+
+    Returns
+    -------
+    int
+        Rows of the env frame ``build_env_frame`` will return.
+    """
+    market = _market_features(ohlcv)
+    return int(market.notna().all(axis=1).sum())
+
+
+def build_env_frame(
+    ohlcv: pd.DataFrame,
+    gmm_train_idx: "int | np.ndarray",
+) -> pd.DataFrame:
+    """
+    Build the env-ready frame (close + 21 features) from raw OHLCV.
+
+    Market features are computed over the FULL raw series (so rolling windows
+    keep their history), then warmup-NaN rows are trimmed. The regime GMM is
+    fitted ONLY on ``gmm_train_idx`` — positional rows of the *clean* frame —
+    and transformed causally over the whole series.
+
+    This is the per-fold entry point of the ADR-040 walk-forward gate: call it
+    once per fold with that fold's train indices, then slice train/test rows
+    from the result. Never fit the GMM on a global split when folding.
+
+    Parameters
+    ----------
+    ohlcv : pd.DataFrame
+        Raw OHLCV (columns open/high/low/close/volume, DatetimeIndex UTC).
+    gmm_train_idx : int or np.ndarray
+        Positional indices into the returned (clean) frame that the GMM may
+        see in ``fit``. An int ``k`` means the first ``k`` clean bars.
+
+    Returns
+    -------
+    pd.DataFrame
+        UTC DatetimeIndex, columns = ["close", *14 market, *7 regime], no NaN.
+        Length == ``n_clean_bars(ohlcv)``.
+    """
+    market = _market_features(ohlcv)
+    clean_mask = market.notna().all(axis=1)
+    ohlcv_clean = ohlcv.loc[clean_mask]
+    market_clean = market.loc[clean_mask]
+    if len(ohlcv_clean) < 50:
+        raise RuntimeError(
+            f"only {len(ohlcv_clean)} clean bars; widen the date range"
+        )
+
+    regime = _regime_features(ohlcv_clean, gmm_train_idx)
+
+    out = pd.concat(
+        [ohlcv_clean["close"].rename("close"), market_clean, regime], axis=1
+    )
+    out = out.reindex(columns=["close", *_MARKET_FEATURES, *_REGIME_FEATURES])
+    return out.dropna()
 
 
 def build_drl_dataset(
@@ -148,35 +322,15 @@ def build_drl_dataset(
     pd.DataFrame
         UTC DatetimeIndex, columns = ["close", *14 market, *7 regime], no NaN.
     """
-    start_dt = pd.Timestamp(start, tz="UTC").to_pydatetime()
-    end_dt = pd.Timestamp(end, tz="UTC").to_pydatetime()
     if not 0.0 < train_frac < 1.0:
         raise ValueError(f"train_frac must be in (0,1), got {train_frac}")
 
-    ohlcv = _fetch_ohlcv(symbol, start_dt, end_dt, timeframe, feed)
-    if str(ohlcv.index.tz) != "UTC":
-        ohlcv.index = ohlcv.index.tz_convert("UTC")
-
-    market = _market_features(ohlcv)
+    ohlcv = fetch_ohlcv_frame(symbol, start, end, timeframe=timeframe, feed=feed)
 
     # Trim warmup NaN BEFORE computing the split so the regime boundary aligns
     # with the clean dataset the driver will split.
-    clean_mask = market.notna().all(axis=1)
-    ohlcv_clean = ohlcv.loc[clean_mask]
-    market_clean = market.loc[clean_mask]
-    if len(ohlcv_clean) < 50:
-        raise RuntimeError(
-            f"only {len(ohlcv_clean)} clean bars for {symbol}; widen the date range"
-        )
-
-    split_idx = int(len(ohlcv_clean) * train_frac)
-    regime = _regime_features(ohlcv_clean, split_idx)
-
-    out = pd.concat(
-        [ohlcv_clean["close"].rename("close"), market_clean, regime], axis=1
-    )
-    out = out.reindex(columns=["close", *_MARKET_FEATURES, *_REGIME_FEATURES])
-    out = out.dropna()
+    split_idx = int(n_clean_bars(ohlcv) * train_frac)
+    out = build_env_frame(ohlcv, split_idx)
     logger.info(
         "drl_dataset built: %s rows=%d cols=%d train_split=%d (%.0f%%)",
         symbol, len(out), out.shape[1], split_idx, 100 * train_frac,

@@ -88,3 +88,6 @@ pytest_fail.txt
 research/data/alpaca_bars/
 research/artifacts/
 pytest_fail.txt
+
+# Alpaca parquet cache when running CLIs from repo root (ADR-040 gate)
+data/alpaca_bars/

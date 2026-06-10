@@ -20,28 +20,33 @@ Usage
 Options
 -------
     --algo          dqn | ppo | sac. Default: dqn.
-    --episodes      DQN: number of episodes. Default: 500.
+    --episodes      DQN: number of episodes (also per gate fold). Default: 500.
     --updates       PPO: number of policy updates. Default: 200.
     --steps         SAC: number of environment steps. Default: 100000.
     --seed          Random seed. Default: 42.
     --as-of         Point-in-time end date for the (stub) dataset. Default: today.
     --train-frac    Fraction of data used for training; rest is held-out OOS eval.
+    --wf-folds      Walk-forward OOS folds for the DSR gate (ADR-040). Default: 5.
+    --n-trials-searched  Number of agent configs/seeds actually searched —
+                    deflates the DSR for selection bias. Default: 1.
     --device        cpu | cuda. Default: cpu.
     --checkpoint-dir  Output dir for checkpoints. Default: artifacts/drl/<algo>.
     --dry-run       Build env + trainer and validate; do not train.
 
 Exit codes
 ----------
-    0  training completed (and, for DQN, held-out OOS mean reward > 0).
+    0  training completed and the walk-forward DSR gate PASSED (DQN).
     1  invalid configuration / insufficient data.
-    2  trained but held-out OOS evaluation shows no edge (DQN only).
+    2  trained but the DSR gate FAILED — do not promote (DQN only).
 
-Anti-leakage
-------------
-Training and evaluation use disjoint, time-ordered slices of the data
-(`--train-frac` split). The trainer never sees the evaluation slice. This is
-the minimal walk-forward contract; full DSR-vs-XGBoost-baseline gating is a
-follow-up (see TODO below).
+Promotion gate (ADR-040)
+------------------------
+For DQN the old single-split heuristic ``edge = oos_reward > 0`` is replaced
+by ``models.drl.dsr_gate``: the agent is re-trained per walk-forward fold
+(regime GMM re-fitted on each fold's train bars only, embargo >= 60 bars),
+evaluated greedily (eps=0) on concatenated OOS folds, and promoted only if
+DSR_agent > threshold AND Sharpe_agent > buy-and-hold AND DSR_agent >
+DSR_XGBoost (CLAUDE.md §6.10). Cost scales as ``wf_folds x episodes``.
 """
 from __future__ import annotations
 
@@ -85,6 +90,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--as-of", type=str, default=date.today().isoformat())
     parser.add_argument("--train-frac", type=float, default=0.7)
+    parser.add_argument("--wf-folds", type=int, default=5,
+                        help="Walk-forward OOS folds for the DSR gate (ADR-040)")
+    parser.add_argument("--n-trials-searched", type=int, default=1,
+                        help="Configs/seeds actually searched (DSR deflation)")
     # Real-data source (Alpaca). If --symbol is omitted, a synthetic stub is used.
     parser.add_argument("--symbol", type=str, default=None,
                         help="Ticker for real Alpaca data, e.g. SPY (omit = stub)")
@@ -100,16 +109,12 @@ def _parse_args() -> argparse.Namespace:
 
 def _build_stub_data(n_bars: int, as_of: date, seed: int):
     """
-    Synthetic OHLC stub: a single ``close`` series on a UTC daily index.
+    Synthetic OHLCV stub: a random-walk close with consistent OHLV columns
+    on a UTC daily index.
 
-    The TradingEnvironment only strictly requires a ``close`` column and a
-    timezone-aware (UTC) DatetimeIndex; the 42-dim observation block defaults
-    missing feature columns to 0.0. This is enough to validate the training
-    loop end-to-end in the cloud.
-
-    TODO(@alex 2026-06-30): replace with the real loader from TimescaleDB /
-    Parquet (offline feature store), populating market + regime feature columns
-    so the agent trains on real signal rather than a random walk.
+    Full OHLCV (not just close) so the stub flows through the same feature
+    pipeline as real data (``data.drl_dataset.build_env_frame``) and through
+    the ADR-040 walk-forward gate. Not real signal — wiring validation only.
     """
     import numpy as np
     import pandas as pd
@@ -117,7 +122,14 @@ def _build_stub_data(n_bars: int, as_of: date, seed: int):
     rng = np.random.default_rng(seed)
     idx = pd.date_range(end=pd.Timestamp(as_of, tz="UTC"), periods=n_bars, freq="D")
     close = 100.0 * np.cumprod(1.0 + rng.normal(0.0, 0.01, n_bars))
-    return pd.DataFrame({"close": close}, index=idx)
+    high = close * (1.0 + np.abs(rng.normal(0.0, 0.005, n_bars)))
+    low = close * (1.0 - np.abs(rng.normal(0.0, 0.005, n_bars)))
+    open_ = np.clip(close * (1.0 + rng.normal(0.0, 0.003, n_bars)), low, high)
+    volume = rng.integers(1_000_000, 5_000_000, n_bars).astype(float)
+    return pd.DataFrame(
+        {"open": open_, "high": high, "low": low, "close": close, "volume": volume},
+        index=idx,
+    )
 
 
 def _evaluate_dqn(trainer, eval_env, n_episodes: int = 20) -> float:
@@ -142,34 +154,48 @@ def _evaluate_dqn(trainer, eval_env, n_episodes: int = 20) -> float:
     return float(sum(rewards) / len(rewards)) if rewards else 0.0
 
 
-def _load_data(args: argparse.Namespace):
-    """Real Alpaca dataset when --symbol is given, else the synthetic stub."""
-    if args.symbol:
-        if not (args.start and args.end):
+def _load_raw_ohlcv(args: argparse.Namespace):
+    """Raw OHLCV frame: real Alpaca bars when --symbol, else synthetic stub."""
+    symbol = getattr(args, "symbol", None)
+    if symbol:
+        start, end = getattr(args, "start", None), getattr(args, "end", None)
+        if not (start and end):
             raise ValueError("--symbol requires --start and --end")
-        from data.drl_dataset import build_drl_dataset
+        from data.drl_dataset import fetch_ohlcv_frame
 
+        timeframe = getattr(args, "timeframe", "1d")
+        feed = getattr(args, "feed", "iex")
         logger.info("Loading REAL data: %s [%s..%s] tf=%s feed=%s",
-                    args.symbol, args.start, args.end, args.timeframe, args.feed)
-        return build_drl_dataset(
-            args.symbol, args.start, args.end,
-            timeframe=args.timeframe, train_frac=args.train_frac, feed=args.feed,
-        )
+                    symbol, start, end, timeframe, feed)
+        return fetch_ohlcv_frame(symbol, start, end, timeframe=timeframe, feed=feed)
 
     ep_len = EnvironmentConfig().episode_length
-    min_bars = int((ep_len + 2) / min(args.train_frac, 1.0 - args.train_frac)) + 2
+    # +90 covers the rolling-feature warmup trimmed by build_env_frame.
+    min_bars = int((ep_len + 2) / min(args.train_frac, 1.0 - args.train_frac)) + 92
     logger.info("Loading STUB data (random-walk) — not real signal.")
     return _build_stub_data(
         n_bars=max(min_bars, 1200), as_of=date.fromisoformat(args.as_of), seed=args.seed
     )
 
 
-def _split_envs(args: argparse.Namespace) -> tuple[TradingEnvironment, TradingEnvironment]:
+def _split_envs(
+    args: argparse.Namespace,
+    raw=None,
+) -> tuple[TradingEnvironment, TradingEnvironment]:
+    """Single-split train/eval envs (checkpoint training path).
+
+    The regime GMM is fitted on the train fraction only (anti-leakage);
+    the walk-forward gate re-fits it per fold separately (ADR-040 §4.1).
+    """
+    from data.drl_dataset import build_env_frame, n_clean_bars
+
     env_cfg = EnvironmentConfig()
     ep_len = env_cfg.episode_length
-    data = _load_data(args)
+    if raw is None:
+        raw = _load_raw_ohlcv(args)
 
-    split = int(len(data) * args.train_frac)
+    split = int(n_clean_bars(raw) * args.train_frac)
+    data = build_env_frame(raw, gmm_train_idx=split)
     train_data, eval_data = data.iloc[:split], data.iloc[split:]
     if len(train_data) < ep_len + 1 or len(eval_data) < ep_len + 1:
         raise ValueError(
@@ -188,7 +214,8 @@ def _run(args: argparse.Namespace) -> int:
     logger.info("algo=%s seed=%d device=%s train_frac=%.2f as_of=%s",
                 args.algo, args.seed, args.device, args.train_frac, args.as_of)
 
-    train_env, eval_env = _split_envs(args)
+    raw = _load_raw_ohlcv(args)
+    train_env, eval_env = _split_envs(args, raw=raw)
     logger.info("Envs built: train/eval temporal split (disjoint, anti-leakage).")
 
     if args.dry_run:
@@ -199,13 +226,49 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.algo == "dqn":
         from models.drl import DQNConfig, DQNTrainer, TradingDQN
+        from models.drl.dsr_gate import (
+            AgentSpec,
+            buyhold_oos_returns,
+            evaluate_drl_gate,
+            make_wf_splitter,
+            walk_forward_oos_returns,
+            xgb_oos_returns,
+        )
 
-        net = TradingDQN(obs_dim=EnvironmentConfig().obs_dim)
+        env_cfg = EnvironmentConfig()
+
+        # 1) Single-split training run — produces the checkpoint artifacts.
+        net = TradingDQN(obs_dim=env_cfg.obs_dim)
         trainer = DQNTrainer(net, DQNConfig(device=args.device))
         trainer.train(train_env, n_episodes=args.episodes, checkpoint_dir=ckpt_dir)
-        oos = _evaluate_dqn(trainer, eval_env)
-        logger.info("Held-out OOS mean reward (greedy): %.5f", oos)
-        edge = oos > 0.0
+        oos = _evaluate_dqn(trainer, eval_env, n_episodes=5)
+        logger.info("Held-out OOS mean reward (greedy, diagnostic only): %.5f", oos)
+
+        # 2) ADR-040 promotion gate: walk-forward DSR vs baselines.
+        wf_folds = getattr(args, "wf_folds", 5)
+        n_trials = getattr(args, "n_trials_searched", 1)
+        splitter = make_wf_splitter(raw, n_folds=wf_folds, env_cfg=env_cfg)
+        logger.info(
+            "DSR gate: folds=%d train0=%d test=%d embargo=%d episodes/fold=%d",
+            wf_folds, splitter.train_size, splitter.test_size,
+            splitter.embargo, args.episodes,
+        )
+        spec = AgentSpec(
+            algo="dqn", episodes=args.episodes, seed=args.seed, device=args.device,
+        )
+        agent_r = walk_forward_oos_returns(
+            spec, raw, splitter, env_cfg, seed=args.seed,
+        )
+        buyhold_r = buyhold_oos_returns(raw, splitter, fee_bps=env_cfg.fee_bps)
+        xgb_r = xgb_oos_returns(
+            raw, splitter, fee_bps=env_cfg.fee_bps, seed=args.seed,
+        )
+        result = evaluate_drl_gate(agent_r, buyhold_r, xgb_r, n_trials=n_trials)
+        elapsed = time.monotonic() - start_t
+        logger.info("Training + gate done in %.1fs. Checkpoints → %s", elapsed, ckpt_dir)
+        logger.info("GATE: %s", result.reason)
+        logger.info("GateResult: %s", result)
+        return 0 if result.passed else 2
 
     elif args.algo == "ppo":
         from models.drl import PPOConfig, PPOTrainer, TradingActorCritic
@@ -213,7 +276,7 @@ def _run(args: argparse.Namespace) -> int:
         ac = TradingActorCritic()
         trainer = PPOTrainer(ac, PPOConfig(device=args.device))
         trainer.train(train_env, n_updates=args.updates, checkpoint_dir=ckpt_dir)
-        edge = True  # TODO(@alex 2026-06-30): OOS eval + DSR gate for PPO
+        edge = True  # TODO(@alex 2026-06-30): extend AgentSpec/DSR gate to PPO
 
     else:  # sac
         from models.drl import SACConfig, SACTrainer, TradingDiscreteActor
@@ -221,18 +284,15 @@ def _run(args: argparse.Namespace) -> int:
         actor = TradingDiscreteActor()
         trainer = SACTrainer(actor, SACConfig(device=args.device))
         trainer.train(train_env, n_steps=args.steps, checkpoint_dir=ckpt_dir)
-        edge = True  # TODO(@alex 2026-06-30): OOS eval + DSR gate for SAC
+        edge = True  # TODO(@alex 2026-06-30): extend AgentSpec/DSR gate to SAC
 
     elapsed = time.monotonic() - start_t
     logger.info("Training done in %.1fs. Checkpoints → %s", elapsed, ckpt_dir)
 
-    # TODO(@alex 2026-06-30): replace `edge` heuristic with walk-forward DSR
-    # comparison vs the XGBoost baseline (CLAUDE.md §6.10): promote only if
-    # DSR_agent > DSR_baseline on concatenated OOS folds.
     if edge:
-        logger.info("SUCCESS: training completed with positive OOS signal. Exit 0.")
+        logger.info("SUCCESS: training completed. Exit 0.")
         return 0
-    logger.warning("NO EDGE: OOS mean reward <= 0. Document and do not promote. Exit 2.")
+    logger.warning("NO EDGE: do not promote. Exit 2.")
     return 2
 
 
