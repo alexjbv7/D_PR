@@ -1953,9 +1953,11 @@ operar en este repositorio. Es **vinculante** y persiste entre sesiones.
 | 037 | Diseño del Environment DRL (estado, acción, reward) | Accepted |
 | 038 | Arquitectura de redes policy/value (DQN → PPO → SAC) | Accepted |
 | 039 | Pipeline de entrenamiento DRL (loop, checkpointing, gates, Optuna) | Accepted |
+| 040 | Gate de promoción DSR walk-forward para DRL (vs buy-and-hold + XGBoost; GMM por fold; --n-jobs paralelo) | Accepted |
+| 041 | Reward shaping mark-to-market (alinea train/eval; enmienda anti-patrón ADR-037; Optuna subordinado al fix) | Accepted |
 
 ---
 
-**Última actualización**: 2026-06-03 (ADR-036 DRL-First; pivot arquitectura primaria a Deep RL; XGBoost como baseline; escalera Q-learning→DQN→PPO→SAC)
+**Última actualización**: 2026-06-10 (ADR-041 implementado: reward MTM por barra default en `TradingEnvironment` con legacy `"realized"` para A/B; idéntico bit-a-bit a `positions_to_returns` del gate; pendiente re-run gate SPY con `reward_mode="mtm"` antes de considerar Optuna §5)
 **Maintainers**: Alex (lead), Claude (AI assistant)
 **Status**: Living document. Actualizar con cada cambio arquitectónico.

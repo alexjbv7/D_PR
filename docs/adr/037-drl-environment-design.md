@@ -1,8 +1,10 @@
 # ADR-037 — Diseño del Environment DRL (Estado, Acción, Reward)
 
-**Status**: Accepted  
+**Status**: Accepted (reward enmendado por ADR-041)  
 **Date**: 2026-06-03  
 **Depende de**: ADR-036 (DRL-First)  
+**Enmendado por**: ADR-041 (reward mark-to-market por barra; el reward de este
+ADR se preserva como `reward_mode="realized"` para A/B)  
 **Próximo**: ADR-038 (Arquitectura de redes policy/value)
 
 ---
@@ -176,6 +178,16 @@ independiente del tamaño de la cuenta — el agente aprende la política, no el
 **Solo P&L realizado**: incluir P&L no realizado crea incentivos perversos (el agente
 mantiene posiciones perdedoras esperando recuperación). El P&L se realiza cuando se cierra
 la posición o al final del episodio.
+
+> **Enmienda ADR-041 (precisión del anti-patrón).** Lo prohibido es el P&L
+> **no realizado acumulado** de una posición abierta: recompensar la ganancia
+> en papel total sí incentiva sostener perdedoras esperando recuperación.
+> El retorno **mark-to-market por barra** (`pos_{t-1} · price_return_t`,
+> ADR-041 §3) NO es ese anti-patrón: una posición perdedora sangra reward
+> negativo cada barra, creando presión para salir. Es además el reward
+> estándar en RL para trading y coincide con la métrica del gate (ADR-040
+> §3.3). Este componente `r_pnl` realizado queda preservado sin cambios como
+> `reward_mode="realized"` para A/B; el default pasa a ser `"mtm"`.
 
 ### Componente 2 — Penalización por riesgo (r_risk)
 

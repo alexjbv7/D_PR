@@ -7,6 +7,7 @@ from envs.trading_env import (
     EnvironmentConfig,
     TradingEnvironment,
     compute_reward,
+    compute_reward_mtm,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "EnvironmentConfig",
     "TradingEnvironment",
     "compute_reward",
+    "compute_reward_mtm",
 ]

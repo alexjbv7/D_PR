@@ -1,13 +1,23 @@
 """
-Gymnasium-compatible trading environment for DRL (ADR-037).
+Gymnasium-compatible trading environment for DRL (ADR-037, reward per ADR-041).
 
 State vector layout (42 dims): market (15) | regime (7) | portfolio (5) | reserved (15).
+
+Reward modes (ADR-041)
+----------------------
+``"mtm"`` (default): per-bar mark-to-market reward aligned with the gate's
+return definition (``models.drl.dsr_gate.positions_to_returns``, ADR-040 §3.3).
+With ``w_ret = w_cost = 1`` and the penalty terms untriggered, the per-step
+reward equals ``positions_to_returns`` bit-for-bit over the same path.
+
+``"realized"``: legacy ADR-037 reward (realized P&L only, cost scaled by
+price, idle penalty on holding). Preserved unchanged for A/B shadow runs.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import gymnasium as gym
 import numpy as np
@@ -57,9 +67,23 @@ _PORTFOLIO_DIM = 5
 class EnvironmentConfig:
     """Parámetros del environment — dataclass con defaults."""
 
-    # Reward
-    lambda_dd: float = 2.0
+    # Reward mode (ADR-041): "mtm" = mark-to-market por barra (default);
+    # "realized" = legacy ADR-037, preservado para A/B shadow.
+    reward_mode: Literal["mtm", "realized"] = "mtm"
+
+    # Pesos del reward MTM (ADR-041 §3) — espacio de búsqueda de Optuna (§5)
+    w_ret: float = 1.0
+    w_cost: float = 1.0
+    w_dd: float = 2.0
+    w_vol: float = 0.5
+    w_idle: float = 0.001
+    max_flat_bars: int = 20   # barras FLAT toleradas antes de penalizar (mtm)
+
+    # Compartido por ambos modos
     dd_threshold: float = 0.02
+
+    # Reward legacy (ADR-037, reward_mode="realized")
+    lambda_dd: float = 2.0
     lambda_vol: float = 0.5
     idle_penalty: float = 0.001
     max_idle_bars: int = 20
@@ -132,6 +156,80 @@ def compute_reward(
     return float(r_pnl + r_risk + r_cost + r_idle)
 
 
+def compute_reward_mtm(
+    prev_position: float,
+    price_return: float,
+    delta_position: float,
+    fee_bps: float,
+    drawdown: float,
+    vol_realized: float,
+    vol_target: float,
+    position: float,
+    flat_bars: int,
+    *,
+    w_ret: float = 1.0,
+    w_cost: float = 1.0,
+    w_dd: float = 2.0,
+    w_vol: float = 0.5,
+    w_idle: float = 0.001,
+    dd_threshold: float = 0.02,
+    max_flat_bars: int = 20,
+) -> float:
+    """
+    Compute per-bar mark-to-market step reward (pure function — ADR-041 §3).
+
+    ``r_t = w_ret · (pos_{t-1} · price_return_t)
+          − w_cost · (fee_bps / 1e4) · |Δpos_t|
+          − w_dd · max(0, drawdown_t − dd_threshold)
+          − w_vol · max(0, vol_realized_t − vol_target)
+          − w_idle · 1[pos_t == 0 ∧ flat_bars > max_flat_bars]``
+
+    Contract with the promotion gate (ADR-041 §7): with ``w_ret = w_cost = 1``
+    and the penalty terms zero/untriggered, the reward equals
+    ``models.drl.dsr_gate.positions_to_returns`` bit-for-bit on the same path.
+    The cost term is in RETURN units — no ``·price`` factor (the legacy scale
+    bug that made fees dominate the reward for high-priced underlyings).
+
+    This is NOT the ADR-037 unrealized-P&L anti-pattern: a losing position
+    bleeds negative reward every bar, creating pressure to exit (ADR-041 §4).
+
+    Parameters
+    ----------
+    prev_position : float
+        Position held during the bar, ``pos_{t-1}`` ∈ [-1, 1].
+    price_return : float
+        ``close_t / close_{t-1} − 1``; 0.0 on the first bar of an episode.
+    delta_position : float
+        Absolute position change ``|pos_t − pos_{t-1}|``.
+    fee_bps : float
+        Proportional fee in basis points per unit of position change.
+    drawdown : float
+        Current drawdown fraction [0, 1].
+    vol_realized : float
+        Realized volatility at t.
+    vol_target : float
+        Target / reference volatility.
+    position : float
+        Position AFTER acting at t, ``pos_t``.
+    flat_bars : int
+        Consecutive bars spent flat (``pos == 0``) up to and including t.
+    w_ret, w_cost, w_dd, w_vol, w_idle, dd_threshold, max_flat_bars
+        Reward shaping weights (ADR-041 §3; Optuna search space §5).
+
+    Returns
+    -------
+    float
+        Scalar reward for the transition.
+    """
+    r_ret = w_ret * prev_position * price_return
+    r_cost = -w_cost * (fee_bps / 10_000.0) * abs(delta_position)
+    r_dd = -w_dd * max(0.0, drawdown - dd_threshold)
+    r_vol = -w_vol * max(0.0, vol_realized - vol_target)
+    r_idle = -w_idle if (position == 0.0 and flat_bars > max_flat_bars) else 0.0
+
+    return float(r_ret + r_cost + r_dd + r_vol + r_idle)
+
+
 class TradingEnvironment(gym.Env):
     """
     Environment DRL para trading algorítmico.
@@ -176,6 +274,10 @@ class TradingEnvironment(gym.Env):
         self.config = config or EnvironmentConfig()
         if self.config.obs_dim != _OBS_DIM:
             raise ValueError(f"obs_dim must be {_OBS_DIM}, got {self.config.obs_dim}")
+        if self.config.reward_mode not in ("mtm", "realized"):
+            raise ValueError(
+                f"reward_mode must be 'mtm' or 'realized', got {self.config.reward_mode!r}"
+            )
 
         self._rng = np.random.default_rng(seed)
 
@@ -186,6 +288,7 @@ class TradingEnvironment(gym.Env):
         self._equity: float = 1.0
         self._peak_equity: float = 1.0
         self._holding_bars: int = 0
+        self._flat_bars: int = 0
         self._daily_pnl: float = 0.0
         self._episode_start_idx: int = 0
 
@@ -225,6 +328,7 @@ class TradingEnvironment(gym.Env):
         self._equity = 1.0
         self._peak_equity = 1.0
         self._holding_bars = 0
+        self._flat_bars = 0
         self._daily_pnl = 0.0
 
         obs = self._build_observation()
@@ -240,6 +344,15 @@ class TradingEnvironment(gym.Env):
         price = float(row["close"])
         old_position = self._position
 
+        # price_return_t = close_t / close_{t-1} − 1 (ADR-041 §3); 0.0 on the
+        # very first bar — same convention as positions_to_returns (r_0 has no
+        # price term, and pos_{t-1} = 0 there regardless).
+        if self._bar_idx > 0:
+            prev_close = float(self.data.iloc[self._bar_idx - 1]["close"])
+            price_return = price / prev_close - 1.0
+        else:
+            price_return = 0.0
+
         new_position, pnl_realized = self._apply_action(action, price)
         delta_position = float(abs(new_position - old_position))
 
@@ -248,8 +361,10 @@ class TradingEnvironment(gym.Env):
             if old_position == 0:
                 self._holding_bars = 0
             self._holding_bars += 1
+            self._flat_bars = 0
         else:
             self._holding_bars = 0
+            self._flat_bars += 1
 
         self._equity += pnl_realized
         self._daily_pnl += pnl_realized
@@ -261,22 +376,42 @@ class TradingEnvironment(gym.Env):
         vol_realized = float(row.get("vol_realized_20", 0.0))
         vol_target = vol_realized  # historical reference at t
 
-        reward = compute_reward(
-            pnl_realized=pnl_realized,
-            equity=self._equity,
-            drawdown=drawdown,
-            vol_realized=vol_realized,
-            vol_target=vol_target,
-            delta_position=delta_position,
-            price=price,
-            fee_bps=self.config.fee_bps,
-            holding_bars=self._holding_bars,
-            lambda_dd=self.config.lambda_dd,
-            dd_threshold=self.config.dd_threshold,
-            lambda_vol=self.config.lambda_vol,
-            max_idle_bars=self.config.max_idle_bars,
-            idle_penalty=self.config.idle_penalty,
-        )
+        if self.config.reward_mode == "mtm":
+            reward = compute_reward_mtm(
+                prev_position=float(old_position),
+                price_return=price_return,
+                delta_position=delta_position,
+                fee_bps=self.config.fee_bps,
+                drawdown=drawdown,
+                vol_realized=vol_realized,
+                vol_target=vol_target,
+                position=float(self._position),
+                flat_bars=self._flat_bars,
+                w_ret=self.config.w_ret,
+                w_cost=self.config.w_cost,
+                w_dd=self.config.w_dd,
+                w_vol=self.config.w_vol,
+                w_idle=self.config.w_idle,
+                dd_threshold=self.config.dd_threshold,
+                max_flat_bars=self.config.max_flat_bars,
+            )
+        else:
+            reward = compute_reward(
+                pnl_realized=pnl_realized,
+                equity=self._equity,
+                drawdown=drawdown,
+                vol_realized=vol_realized,
+                vol_target=vol_target,
+                delta_position=delta_position,
+                price=price,
+                fee_bps=self.config.fee_bps,
+                holding_bars=self._holding_bars,
+                lambda_dd=self.config.lambda_dd,
+                dd_threshold=self.config.dd_threshold,
+                lambda_vol=self.config.lambda_vol,
+                max_idle_bars=self.config.max_idle_bars,
+                idle_penalty=self.config.idle_penalty,
+            )
 
         self._episode_step += 1
         self._bar_idx += 1
@@ -284,8 +419,18 @@ class TradingEnvironment(gym.Env):
         terminated = self._episode_step >= self.config.episode_length
         truncated = False
 
-        if terminated and self._position != 0:
-            # Mark-to-market at episode end (ADR-037)
+        if (
+            terminated
+            and self._position != 0
+            and self.config.reward_mode == "realized"
+        ):
+            # Legacy episode-end forced close (ADR-037). In "mtm" the episode
+            # ends with the position open: the per-bar rewards already paid
+            # its returns, and a forced close would charge a phantom exit fee
+            # the gate's return series never sees — `info["position"]` must
+            # report the agent's true position for positions_to_returns to
+            # match the training reward bit-for-bit (ADR-041 §7). The gate
+            # gives buy-and-hold the same no-liquidation treatment.
             final_price = float(self.data.iloc[min(self._bar_idx, len(self.data) - 1)]["close"])
             mtm = self._close_position(final_price)
             self._equity += mtm

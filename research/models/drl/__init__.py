@@ -45,6 +45,13 @@ _EXPORTS: dict[str, str] = {
     "positions_to_returns": "models.drl.dsr_gate",
     "walk_forward_oos_returns": "models.drl.dsr_gate",
     "xgb_oos_returns": "models.drl.dsr_gate",
+    # Reward weight search (ADR-041 §5) — torch-free module
+    "MAX_FINALISTS": "models.drl.reward_search",
+    "MAX_PROXY_TRIALS": "models.drl.reward_search",
+    "honest_gate_n_trials": "models.drl.reward_search",
+    "proxy_validation_split": "models.drl.reward_search",
+    "search_reward_weights": "models.drl.reward_search",
+    "suggest_reward_weights": "models.drl.reward_search",
 }
 
 __all__ = sorted(_EXPORTS)
