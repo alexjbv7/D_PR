@@ -85,6 +85,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--as-of", type=str, default=date.today().isoformat())
     parser.add_argument("--train-frac", type=float, default=0.7)
+    # Real-data source (Alpaca). If --symbol is omitted, a synthetic stub is used.
+    parser.add_argument("--symbol", type=str, default=None,
+                        help="Ticker for real Alpaca data, e.g. SPY (omit = stub)")
+    parser.add_argument("--start", type=str, default=None, help="Real data start (ISO)")
+    parser.add_argument("--end", type=str, default=None, help="Real data end (ISO)")
+    parser.add_argument("--timeframe", type=str, default="1d", help="Alpaca timeframe")
+    parser.add_argument("--feed", type=str, default="iex", help="Alpaca feed (iex|sip)")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--checkpoint-dir", type=str, default=None)
     parser.add_argument("--dry-run", action="store_true")
@@ -135,12 +142,32 @@ def _evaluate_dqn(trainer, eval_env, n_episodes: int = 20) -> float:
     return float(sum(rewards) / len(rewards)) if rewards else 0.0
 
 
+def _load_data(args: argparse.Namespace):
+    """Real Alpaca dataset when --symbol is given, else the synthetic stub."""
+    if args.symbol:
+        if not (args.start and args.end):
+            raise ValueError("--symbol requires --start and --end")
+        from data.drl_dataset import build_drl_dataset
+
+        logger.info("Loading REAL data: %s [%s..%s] tf=%s feed=%s",
+                    args.symbol, args.start, args.end, args.timeframe, args.feed)
+        return build_drl_dataset(
+            args.symbol, args.start, args.end,
+            timeframe=args.timeframe, train_frac=args.train_frac, feed=args.feed,
+        )
+
+    ep_len = EnvironmentConfig().episode_length
+    min_bars = int((ep_len + 2) / min(args.train_frac, 1.0 - args.train_frac)) + 2
+    logger.info("Loading STUB data (random-walk) — not real signal.")
+    return _build_stub_data(
+        n_bars=max(min_bars, 1200), as_of=date.fromisoformat(args.as_of), seed=args.seed
+    )
+
+
 def _split_envs(args: argparse.Namespace) -> tuple[TradingEnvironment, TradingEnvironment]:
     env_cfg = EnvironmentConfig()
     ep_len = env_cfg.episode_length
-    # Need enough bars on each side of the split for at least one episode.
-    min_bars = int((ep_len + 2) / min(args.train_frac, 1.0 - args.train_frac)) + 2
-    data = _build_stub_data(n_bars=max(min_bars, 1200), as_of=date.fromisoformat(args.as_of), seed=args.seed)
+    data = _load_data(args)
 
     split = int(len(data) * args.train_frac)
     train_data, eval_data = data.iloc[:split], data.iloc[split:]
