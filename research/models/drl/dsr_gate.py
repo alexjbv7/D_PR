@@ -298,6 +298,90 @@ def _validated_folds(
 # =====================================================================
 
 
+def _train_eval_one_fold(
+    k: int,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    raw_ohlcv: pd.DataFrame,
+    env_cfg: EnvironmentConfig,
+    agent_spec: AgentSpec,
+    seed: int,
+    threads_per_worker: int = 0,
+) -> Tuple[int, np.ndarray]:
+    """
+    Train the agent on fold ``k``'s train bars; return ``(k, greedy OOS returns)``.
+
+    Module-level (picklable) so it can run in a worker process for fold-level
+    parallelism (ADR-040 §6). The regime GMM is re-fitted on exactly this
+    fold's train bars (anti-leakage, §4.1). Each fold reseeds with ``seed + k``
+    so the result is independent of how folds are scheduled.
+
+    ``threads_per_worker`` pins ``torch.set_num_threads`` when > 0 — set to 1
+    when running many folds concurrently to avoid CPU oversubscription; leave 0
+    (torch default) when a single fold runs at a time.
+    """
+    import random
+
+    import torch  # heavy import — keep the module torch-free for tests 1-6
+
+    if threads_per_worker > 0:
+        torch.set_num_threads(threads_per_worker)
+
+    # Seed every RNG the trainer touches so a fold is reproducible regardless of
+    # process/scheduling: torch (network init, epsilon-greedy), python ``random``
+    # (ReplayBuffer.sample), and numpy. Without seeding ``random`` here, serial
+    # and parallel runs would diverge (ReplayBuffer uses the global random state).
+    random.seed(seed + k)
+    np.random.seed((seed + k) % (2**32))
+
+    from models.drl.dqn import TradingDQN
+    from models.drl.dqn_trainer import DQNConfig, DQNTrainer
+
+    frame = build_env_frame(raw_ohlcv, gmm_train_idx=train_idx)
+    train_df = frame.iloc[train_idx]
+    test_df = frame.iloc[test_idx]
+    if len(train_df) < 2 or len(test_df) < 2:
+        raise ValueError(
+            f"fold {k}: train={len(train_df)} test={len(test_df)} too small"
+        )
+
+    torch.manual_seed(seed + k)
+    train_cfg = dataclasses.replace(
+        env_cfg,
+        episode_length=min(env_cfg.episode_length, len(train_df) - 1),
+    )
+    train_env = TradingEnvironment(train_df, config=train_cfg, seed=seed + k)
+
+    net = TradingDQN(obs_dim=env_cfg.obs_dim)
+    dqn_cfg = agent_spec.config or DQNConfig(device=agent_spec.device)
+    trainer = DQNTrainer(net, dqn_cfg)
+    trainer.train(
+        train_env,
+        n_episodes=agent_spec.episodes,
+        checkpoint_dir=None,
+        log_every=0,
+    )
+
+    positions = _greedy_positions(trainer, test_df, env_cfg, seed=seed + k)
+    closes = test_df["close"].to_numpy()[: len(positions)]
+    r = positions_to_returns(positions, closes, env_cfg.fee_bps)
+    logger.info(
+        "gate fold %d: train=%d test=%d oos_bars=%d mean_r=%.6f",
+        k, len(train_df), len(test_df), len(r), float(np.mean(r)),
+    )
+    return k, r
+
+
+def _concat_fold_returns(results: list[Tuple[int, np.ndarray]]) -> np.ndarray:
+    """
+    Concatenate per-fold return arrays in ascending fold order (``k``),
+    regardless of the order parallel workers completed. Preserves the
+    chronological OOS sequence the DSR is computed on.
+    """
+    ordered = sorted(results, key=lambda kr: kr[0])
+    return np.concatenate([r for _, r in ordered])
+
+
 def walk_forward_oos_returns(
     agent_spec: AgentSpec,
     raw_ohlcv: pd.DataFrame,
@@ -305,13 +389,13 @@ def walk_forward_oos_returns(
     env_cfg: EnvironmentConfig,
     *,
     seed: int = 42,
+    n_jobs: int = 1,
+    threads_per_worker: Optional[int] = None,
 ) -> np.ndarray:
     """
     Train the agent per fold on train_k, evaluate GREEDY (eps=0) on test_k,
-    and concatenate the per-bar test returns. No train/test overlap.
-
-    Per fold the regime GMM is re-fitted on exactly that fold's train bars
-    (ADR-040 §4.1) via ``build_env_frame(raw, gmm_train_idx=train_idx)``.
+    and concatenate the per-bar test returns in fold order. No train/test
+    overlap; the regime GMM is re-fitted per fold (ADR-040 §4.1).
 
     Parameters
     ----------
@@ -325,11 +409,22 @@ def walk_forward_oos_returns(
         Environment/reward parameters (``fee_bps`` is reused in §3.3).
     seed : int
         Base seed for torch/env; fold ``k`` uses ``seed + k``.
+    n_jobs : int
+        Folds to train concurrently (ADR-040 §6). Folds are independent
+        (embarrassingly parallel). ``1`` = serial (default); capped at the
+        number of folds. On a multi-core machine ``n_jobs == n_folds`` cuts
+        wall-clock to roughly one fold's training time. Each fold reseeds with
+        ``seed + k``, so results are assembled in fold order regardless of
+        ``n_jobs``.
+    threads_per_worker : int, optional
+        ``torch.set_num_threads`` per fold. ``None`` (default) auto-selects: 1
+        when ``n_jobs > 1`` (avoid oversubscription), else 0 (torch default —
+        let a single fold use all cores).
 
     Returns
     -------
     np.ndarray
-        Concatenated OOS per-bar returns across all folds.
+        Concatenated OOS per-bar returns across all folds, in fold order.
     """
     if agent_spec.algo != "dqn":
         raise NotImplementedError(
@@ -337,48 +432,57 @@ def walk_forward_oos_returns(
             f"PPO/SAC gating is a follow-up (ADR-040 §6)"
         )
 
-    import torch  # heavy import — keep the module torch-free (tests 1-6)
+    jobs = [
+        (k, train_idx, test_idx)
+        for k, (train_idx, test_idx) in enumerate(
+            _validated_folds(raw_ohlcv, splitter)
+        )
+    ]
+    n_jobs = max(1, min(n_jobs, len(jobs)))
+    if threads_per_worker is None:
+        threads_per_worker = 1 if n_jobs > 1 else 0
 
-    from models.drl.dqn import TradingDQN
-    from models.drl.dqn_trainer import DQNConfig, DQNTrainer
-
-    fold_returns: list[np.ndarray] = []
-    for k, (train_idx, test_idx) in enumerate(_validated_folds(raw_ohlcv, splitter)):
-        frame = build_env_frame(raw_ohlcv, gmm_train_idx=train_idx)
-        train_df = frame.iloc[train_idx]
-        test_df = frame.iloc[test_idx]
-        if len(train_df) < 2 or len(test_df) < 2:
-            raise ValueError(
-                f"fold {k}: train={len(train_df)} test={len(test_df)} too small"
+    if n_jobs == 1:
+        results = [
+            _train_eval_one_fold(
+                k, tr, te, raw_ohlcv, env_cfg, agent_spec, seed, threads_per_worker
             )
+            for k, tr, te in jobs
+        ]
+    else:
+        import os
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        from pathlib import Path
 
-        torch.manual_seed(seed + k)
-        train_cfg = dataclasses.replace(
-            env_cfg,
-            episode_length=min(env_cfg.episode_length, len(train_df) - 1),
-        )
-        train_env = TradingEnvironment(train_df, config=train_cfg, seed=seed + k)
+        # Windows uses 'spawn': child processes do NOT inherit the parent's
+        # sys.path (which the CLI sets via insert). They DO inherit env vars, so
+        # put research/ and shared/ on PYTHONPATH for the workers to import
+        # models.drl.dsr_gate. Harmless on Linux (fork).
+        _research = Path(__file__).resolve().parents[2]
+        _paths = [str(_research), str(_research.parent / "shared")]
+        _existing = os.environ.get("PYTHONPATH", "")
+        os.environ["PYTHONPATH"] = os.pathsep.join(
+            [*_paths, _existing]
+        ).strip(os.pathsep)
 
-        net = TradingDQN(obs_dim=env_cfg.obs_dim)
-        dqn_cfg = agent_spec.config or DQNConfig(device=agent_spec.device)
-        trainer = DQNTrainer(net, dqn_cfg)
-        trainer.train(
-            train_env,
-            n_episodes=agent_spec.episodes,
-            checkpoint_dir=None,
-            log_every=0,
-        )
-
-        positions = _greedy_positions(trainer, test_df, env_cfg, seed=seed + k)
-        closes = test_df["close"].to_numpy()[: len(positions)]
-        r = positions_to_returns(positions, closes, env_cfg.fee_bps)
-        fold_returns.append(r)
         logger.info(
-            "gate fold %d: train=%d test=%d oos_bars=%d mean_r=%.6f",
-            k, len(train_df), len(test_df), len(r), float(np.mean(r)),
+            "DSR gate: training %d folds with n_jobs=%d (threads/worker=%d)",
+            len(jobs), n_jobs, threads_per_worker,
         )
+        results = []
+        with ProcessPoolExecutor(max_workers=n_jobs) as pool:
+            futures = [
+                pool.submit(
+                    _train_eval_one_fold,
+                    k, tr, te, raw_ohlcv, env_cfg, agent_spec, seed,
+                    threads_per_worker,
+                )
+                for k, tr, te in jobs
+            ]
+            for fut in as_completed(futures):
+                results.append(fut.result())
 
-    return np.concatenate(fold_returns)
+    return _concat_fold_returns(results)
 
 
 def _greedy_positions(

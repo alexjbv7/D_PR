@@ -253,3 +253,42 @@ def test_end_to_end_stub():
     assert res.n_oos_bars == len(agent_r)
     assert isinstance(res.passed, bool)
     assert res.reason.startswith(("PASS", "FAIL"))
+
+
+# ---------------------------------------------------------------------------
+# 8. Fold-level parallelism preserves chronological order (n_jobs)
+# ---------------------------------------------------------------------------
+
+
+def test_concat_fold_returns_orders_by_fold():
+    # Workers may finish out of order; the OOS sequence must still be assembled
+    # in ascending fold index so the DSR sees the correct chronology.
+    out_of_order = [
+        (2, np.array([2.0, 2.0])),
+        (0, np.array([0.0])),
+        (1, np.array([1.0, 1.0, 1.0])),
+    ]
+    got = dsr_gate._concat_fold_returns(out_of_order)
+    assert list(got) == [0.0, 1.0, 1.0, 1.0, 2.0, 2.0]
+
+
+def test_parallel_matches_serial_end_to_end(tmp_path):
+    # n_jobs>1 must produce the same OOS array as serial: each fold reseeds
+    # with seed+k, so scheduling order is irrelevant.
+    pytest.importorskip("torch")
+
+    ohlcv = _synthetic_ohlcv(520, seed=3)
+    env_cfg = EnvironmentConfig(episode_length=40)
+    splitter = WalkForwardSplitter(
+        train_size=200, test_size=80, embargo=60, expanding=True
+    )
+    spec = dsr_gate.AgentSpec(algo="dqn", episodes=2, seed=0)
+
+    serial = dsr_gate.walk_forward_oos_returns(
+        spec, ohlcv, splitter, env_cfg, seed=0, n_jobs=1, threads_per_worker=1
+    )
+    parallel = dsr_gate.walk_forward_oos_returns(
+        spec, ohlcv, splitter, env_cfg, seed=0, n_jobs=2, threads_per_worker=1
+    )
+    assert serial.shape == parallel.shape
+    assert np.allclose(serial, parallel, atol=1e-8)

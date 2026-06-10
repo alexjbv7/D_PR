@@ -94,6 +94,9 @@ def _parse_args() -> argparse.Namespace:
                         help="Walk-forward OOS folds for the DSR gate (ADR-040)")
     parser.add_argument("--n-trials-searched", type=int, default=1,
                         help="Configs/seeds actually searched (DSR deflation)")
+    parser.add_argument("--n-jobs", type=int, default=1,
+                        help="Folds to train concurrently in the DSR gate "
+                             "(1=serial; set to #cores for a multi-core machine)")
     # Real-data source (Alpaca). If --symbol is omitted, a synthetic stub is used.
     parser.add_argument("--symbol", type=str, default=None,
                         help="Ticker for real Alpaca data, e.g. SPY (omit = stub)")
@@ -258,6 +261,7 @@ def _run(args: argparse.Namespace) -> int:
         )
         agent_r = walk_forward_oos_returns(
             spec, raw, splitter, env_cfg, seed=args.seed,
+            n_jobs=getattr(args, "n_jobs", 1),
         )
         buyhold_r = buyhold_oos_returns(raw, splitter, fee_bps=env_cfg.fee_bps)
         xgb_r = xgb_oos_returns(
