@@ -80,3 +80,7 @@ tools/briefing/output/
 
 # Imágenes generadas (plots van en research/plots/ solo localmente)
 research/plots/*.png
+
+research/data/alpaca_bars/
+research/artifacts/
+pytest_fail.txt
