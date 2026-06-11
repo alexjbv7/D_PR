@@ -47,11 +47,9 @@ import torch
 
 from envs.trading_env import (
     _MARKET_COLS,
-    _MARKET_DIM,
     _OBS_DIM,
-    _PORTFOLIO_DIM,
     _REGIME_COLS,
-    _REGIME_DIM,
+    assemble_observation,
 )
 from models.drl.dqn import TradingDQN
 from quant_shared.contracts import (
@@ -218,45 +216,21 @@ class DqnAlphaAgent:
 
     def _build_observation(self, context: MarketContext) -> np.ndarray:
         """
-        Rebuild the 42-dim env observation (mirrors
-        ``TradingEnvironment._build_observation`` — layout constants imported
-        from the env, ADR-037). See the module docstring for the declared
-        input dependencies and the ``daily_pnl_pct`` limitation.
+        Rebuild the 42-dim env observation via ``envs.trading_env.
+        assemble_observation`` — the SAME pure function the env uses in
+        training, so layout/normalization cannot drift between train and
+        serve. See the module docstring for the declared input dependencies
+        and the ``daily_pnl_pct`` limitation.
         """
-        obs = np.zeros(_OBS_DIM, dtype=np.float32)
-        features = context.features
-
-        # Market block (15)
-        for i, col in enumerate(_MARKET_COLS):
-            if col is not None:
-                obs[i] = float(features.get(col, 0.0))
-
-        # Regime block (7)
-        base = _MARKET_DIM
-        for j, col in enumerate(_REGIME_COLS):
-            obs[base + j] = float(features.get(col, 0.0))
-
-        # Portfolio block (5) — from PortfolioState
-        base += _REGIME_DIM
         pf = context.portfolio
-        unrealized = float(pf.unrealized_pnl)  # fraction of equity
-        max_holding = max(1.0, float(self.config.params.get("episode_length", 252.0)))
-        holding_norm = min(1.0, float(pf.holding_bars) / max_holding)
-        daily_pnl_pct = 0.0  # no source in PortfolioState — declared limitation
-        cash_ratio = 1.0 if pf.position == 0.0 else max(0.0, 1.0 - abs(unrealized))
-        obs[base : base + _PORTFOLIO_DIM] = np.array(
-            [
-                float(pf.position),
-                np.clip(unrealized / 0.10, -1.0, 1.0),
-                holding_norm,
-                np.clip(daily_pnl_pct / 0.05, -1.0, 1.0),
-                cash_ratio,
-            ],
-            dtype=np.float32,
+        return assemble_observation(
+            context.features,
+            position=float(pf.position),
+            unrealized_pnl_pct=float(pf.unrealized_pnl),  # fraction of equity
+            holding_bars=int(pf.holding_bars),
+            max_holding_bars=int(self.config.params.get("episode_length", 252.0)),
+            daily_pnl_pct=0.0,  # no source in PortfolioState — declared limitation
         )
-        # Reserved block (15) stays zero, as in the env.
-
-        return np.clip(obs, -3.0, 3.0).astype(np.float32)
 
 
 def _hash_obs_layout() -> str:

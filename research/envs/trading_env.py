@@ -16,6 +16,7 @@ price, idle penalty on holding). Preserved unchanged for A/B shadow runs.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -61,6 +62,82 @@ _OBS_DIM = 42
 _MARKET_DIM = 15
 _REGIME_DIM = 7
 _PORTFOLIO_DIM = 5
+
+# Portfolio-block normalizers (ADR-037 §1, bloque 3)
+_UNREALIZED_NORM = 0.10
+_DAILY_PNL_NORM = 0.05
+
+
+def assemble_observation(
+    values: "Mapping[str, float] | pd.Series",
+    *,
+    position: float,
+    unrealized_pnl_pct: float,
+    holding_bars: int,
+    max_holding_bars: int,
+    daily_pnl_pct: float,
+) -> np.ndarray:
+    """
+    Assemble the 42-dim observation (pure function — single source of truth).
+
+    Used by BOTH ``TradingEnvironment._build_observation`` (training) and
+    ``alpha.agents.dqn_agent.DqnAlphaAgent`` (serving), so the layout,
+    normalization and clipping cannot drift between train and serve.
+
+    Layout (ADR-037): market (15) | regime (7) | portfolio (5) | reserved (15).
+
+    Parameters
+    ----------
+    values : Mapping[str, float] | pd.Series
+        Market + regime feature values by name (``_MARKET_COLS`` /
+        ``_REGIME_COLS``); absent names read 0.0 (placeholder convention).
+    position : float
+        Current position, sign = direction.
+    unrealized_pnl_pct : float
+        Unrealized P&L as a fraction of equity (normalized by
+        ``_UNREALIZED_NORM``, clipped to ±1).
+    holding_bars : int
+        Bars since the last entry while in a position.
+    max_holding_bars : int
+        Normalizer for ``holding_bars`` (the env uses ``episode_length``).
+    daily_pnl_pct : float
+        Day P&L as a fraction of equity (normalized by ``_DAILY_PNL_NORM``,
+        clipped to ±1).
+
+    Returns
+    -------
+    np.ndarray
+        float32 observation of shape ``(_OBS_DIM,)``, clipped to [-3, 3].
+    """
+    obs = np.zeros(_OBS_DIM, dtype=np.float32)
+
+    # Market block (15)
+    for i, col in enumerate(_MARKET_COLS):
+        if col is not None:
+            obs[i] = float(values.get(col, 0.0))
+
+    # Regime block (7)
+    base = _MARKET_DIM
+    for j, col in enumerate(_REGIME_COLS):
+        obs[base + j] = float(values.get(col, 0.0))
+
+    # Portfolio block (5)
+    base += _REGIME_DIM
+    holding_norm = min(1.0, holding_bars / max(1, max_holding_bars))
+    cash_ratio = 1.0 if position == 0 else max(0.0, 1.0 - abs(unrealized_pnl_pct))
+    obs[base : base + _PORTFOLIO_DIM] = np.array(
+        [
+            float(position),
+            np.clip(unrealized_pnl_pct / _UNREALIZED_NORM, -1.0, 1.0),
+            holding_norm,
+            np.clip(daily_pnl_pct / _DAILY_PNL_NORM, -1.0, 1.0),
+            cash_ratio,
+        ],
+        dtype=np.float32,
+    )
+    # Reserved block (15) stays zero (macro, paso 2 de ADR-037)
+
+    return np.clip(obs, -3.0, 3.0).astype(np.float32)
 
 
 @dataclass
@@ -484,57 +561,26 @@ class TradingEnvironment(gym.Env):
         return pnl
 
     def _build_observation(self) -> np.ndarray:
-        """Assemble 42-dim state per ADR-037; clip to [-3, 3]."""
-        obs = np.zeros(_OBS_DIM, dtype=np.float32)
+        """Assemble the 42-dim state via ``assemble_observation`` (ADR-037)."""
         idx = self._bar_idx
         if idx >= len(self.data):
             idx = len(self.data) - 1
         row = self.data.iloc[idx]
 
-        # Market block (15)
-        for i, col in enumerate(_MARKET_COLS):
-            if col is None:
-                obs[i] = 0.0
-            elif col in row.index:
-                obs[i] = float(row[col])
-            else:
-                obs[i] = 0.0
-
-        base = _MARKET_DIM
-        # Regime block (7)
-        for j, col in enumerate(_REGIME_COLS):
-            if col in row.index:
-                obs[base + j] = float(row[col])
-            else:
-                obs[base + j] = 0.0
-
-        base += _REGIME_DIM
-        # Portfolio block (5)
         unrealized = 0.0
         if self._position != 0 and self._entry_price > 0.0:
             price = float(row["close"])
             ret = (price - self._entry_price) / self._entry_price
             unrealized = float(self._position * ret)
 
-        max_holding = max(1, self.config.episode_length)
-        holding_norm = min(1.0, self._holding_bars / max_holding)
-        daily_pnl_pct = self._daily_pnl / max(self._equity, 1e-8)
-        cash_ratio = 1.0 if self._position == 0 else max(0.0, 1.0 - abs(unrealized))
-
-        portfolio = np.array(
-            [
-                float(self._position),
-                np.clip(unrealized / 0.10, -1.0, 1.0),
-                holding_norm,
-                np.clip(daily_pnl_pct / 0.05, -1.0, 1.0),
-                cash_ratio,
-            ],
-            dtype=np.float32,
+        return assemble_observation(
+            row,
+            position=float(self._position),
+            unrealized_pnl_pct=unrealized,
+            holding_bars=self._holding_bars,
+            max_holding_bars=max(1, self.config.episode_length),
+            daily_pnl_pct=self._daily_pnl / max(self._equity, 1e-8),
         )
-        obs[base : base + _PORTFOLIO_DIM] = portfolio
-        # Remaining dims (macro reserved) stay zero
-
-        return np.clip(obs, -3.0, 3.0).astype(np.float32)
 
     def render(self) -> None:
         """No-op render (MVP)."""

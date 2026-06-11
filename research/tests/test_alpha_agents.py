@@ -194,6 +194,64 @@ class TestDqnAlphaAgent:
         assert obs[23] == pytest.approx(0.05 / 0.10)     # unrealized / 0.10
         assert np.all(obs[27:42] == 0.0)                 # reserved block
 
+    def test_obs_parity_with_env(self, dqn_agent) -> None:
+        """
+        Bit-for-bit parity: the adapter's observation equals the env's for an
+        equivalent state (both delegate to ``assemble_observation`` — no
+        train/serve skew possible).
+        """
+        from envs.trading_env import (
+            ACTION_BUY,
+            ACTION_HOLD,
+            EnvironmentConfig,
+            TradingEnvironment,
+        )
+
+        rng = np.random.default_rng(9)
+        n = 300
+        idx_dt = pd.date_range("2024-01-01", periods=n, freq="1D", tz="UTC")
+        data = pd.DataFrame(
+            rng.standard_normal((n, len(_FEATURE_NAMES))),
+            index=idx_dt,
+            columns=_FEATURE_NAMES,
+        )
+        data["close"] = 100.0 * np.cumprod(1.0 + rng.normal(0.0, 0.01, n))
+
+        # episode_length=252 == el normalizador de holding del adapter
+        # (DQN_CONFIG.params["episode_length"]) — estado equivalente exige
+        # el mismo max_holding_bars en ambos lados.
+        env = TradingEnvironment(
+            data, config=EnvironmentConfig(episode_length=252), seed=3
+        )
+        env.reset(seed=3)
+        env.step(ACTION_BUY)
+        for _ in range(5):
+            env.step(ACTION_HOLD)
+
+        # Estado equivalente, leído del env tras la trayectoria
+        idx = min(env._bar_idx, len(data) - 1)
+        row = data.iloc[idx]
+        price = float(row["close"])
+        ret = (price - env._entry_price) / env._entry_price
+        unrealized = float(env._position * ret)
+        context = MarketContext(
+            symbol="SPY",
+            features={c: float(row[c]) for c in data.columns},
+            portfolio=PortfolioState(
+                position=float(env._position),
+                equity=env._equity,
+                unrealized_pnl=unrealized,
+                holding_bars=env._holding_bars,
+            ),
+        )
+
+        obs_env = env._build_observation()
+        obs_adapter = dqn_agent._build_observation(context)
+        np.testing.assert_array_equal(
+            obs_env, obs_adapter,
+            err_msg="train/serve skew: la obs del adapter difiere de la del env",
+        )
+
     def test_calibrator_is_applied(self, dqn_agent) -> None:
         from alpha.agents.dqn_agent import DqnAlphaAgent
 
