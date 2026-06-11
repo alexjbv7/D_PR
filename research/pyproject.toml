@@ -63,6 +63,7 @@ include = [
     "dashboard*",
     "pipelines*",
     "alpha*",
+    "portfolio*",
 ]
 
 [tool.pytest.ini_options]
