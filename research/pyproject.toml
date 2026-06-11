@@ -62,6 +62,7 @@ include = [
     "instruments*",
     "dashboard*",
     "pipelines*",
+    "alpha*",
 ]
 
 [tool.pytest.ini_options]
