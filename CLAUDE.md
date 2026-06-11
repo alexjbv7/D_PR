@@ -1955,9 +1955,10 @@ operar en este repositorio. Es **vinculante** y persiste entre sesiones.
 | 039 | Pipeline de entrenamiento DRL (loop, checkpointing, gates, Optuna) | Accepted |
 | 040 | Gate de promoción DSR walk-forward para DRL (vs buy-and-hold + XGBoost; GMM por fold; --n-jobs paralelo) | Accepted |
 | 041 | Reward shaping mark-to-market (alinea train/eval; enmienda anti-patrón ADR-037; Optuna subordinado al fix) | Accepted |
+| 043 | Pivote market-neutral: stat-arb de pares cointegrados, gate vs ZERO (β/mean/std/half-life por fold train-only; doble fee 2 patas) | Accepted |
 
 ---
 
-**Última actualización**: 2026-06-10 (ADR-041 implementado: reward MTM por barra default en `TradingEnvironment` con legacy `"realized"` para A/B; idéntico bit-a-bit a `positions_to_returns` del gate; pendiente re-run gate SPY con `reward_mode="mtm"` antes de considerar Optuna §5)
+**Última actualización**: 2026-06-11 (ADR-043 implementado: PairStatArb market-neutral en `research/alpha/statarb/` + `evaluate_zero_gate` en dsr_gate; run real SPY/QQQ → FAIL esperado, los 5 folds rechazan cointegración — método anti-leakage validado, buscar pares mejores)
 **Maintainers**: Alex (lead), Claude (AI assistant)
 **Status**: Living document. Actualizar con cada cambio arquitectónico.

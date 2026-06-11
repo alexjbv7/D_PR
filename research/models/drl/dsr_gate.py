@@ -757,3 +757,109 @@ def evaluate_drl_gate(
         passed=passed,
         reason=reason,
     )
+
+
+def evaluate_zero_gate(
+    agent_returns: np.ndarray,
+    n_trials: int,
+    dsr_threshold: float = 0.4,
+    periods_per_year: int = 252,
+    control_returns: Optional[np.ndarray] = None,
+) -> GateResult:
+    """
+    Gate para estrategias market-neutral — ``benchmark = ZERO`` (ADR-043 §6).
+
+    Para un agente long-short por construcción (stat-arb de pares) el
+    benchmark es el retorno absoluto, NO buy-and-hold: promociona si
+
+    1. ``dsr_agent > dsr_threshold`` (DSR deflactado por ``n_trials``), y
+    2. ``sharpe_agent > 0`` sobre el OOS concatenado.
+
+    Deflación honesta: ``n_trials`` = nº de pares/configs evaluados OOS —
+    buscar entre muchos pares y quedarse con el mejor infla el sesgo de
+    selección (ADR-043 §9); no inflar ni sub-reportar (CLAUDE.md §6.10).
+
+    Parameters
+    ----------
+    agent_returns : np.ndarray
+        Retornos OOS por barra concatenados (``walk_forward_pair_returns``).
+    n_trials : int
+        Pares/configs evaluados out-of-sample (entrada de la deflación).
+    dsr_threshold : float
+        Umbral de DSR (default 0.4).
+    periods_per_year : int
+        Factor de anualización (252 diario).
+    control_returns : np.ndarray, optional
+        Baseline de control (p.ej. long-short con z-score barajado, §6). Se
+        reporta en el campo ``dsr_xgb`` del resultado SOLO como diagnóstico —
+        NO es condición del gate.
+
+    Returns
+    -------
+    GateResult
+        ``sharpe_buyhold`` = 0.0 (el benchmark ES cero); ``dsr_xgb`` lleva el
+        DSR del control si se pasó (0.0 si no).
+    """
+    if n_trials < 1:
+        raise ValueError(f"n_trials must be >= 1, got {n_trials}")
+
+    agent_r = np.asarray(agent_returns, dtype=float)
+    agent_r = agent_r[~np.isnan(agent_r)]
+    n_oos = int(len(agent_r))
+
+    dsr_control = (
+        deflated_sharpe_ratio(
+            np.asarray(control_returns, dtype=float), 1, periods_per_year
+        )
+        if control_returns is not None
+        else 0.0
+    )
+
+    if n_oos < 4:
+        return GateResult(
+            dsr_agent=0.0, psr_agent=0.0, sharpe_agent=float("nan"),
+            sharpe_buyhold=0.0, dsr_xgb=float(dsr_control),
+            n_trials=n_trials, n_oos_bars=n_oos, passed=False,
+            reason=(
+                f"FAIL (benchmark=ZERO): only {n_oos} OOS bars — "
+                f"not enough to estimate DSR"
+            ),
+        )
+
+    psr_agent = probabilistic_sharpe_ratio(agent_r, 0.0, periods_per_year)
+    dsr_agent = deflated_sharpe_ratio(agent_r, n_trials, periods_per_year)
+    sharpe_agent = _annualized_sharpe(agent_r, periods_per_year)
+
+    failures: list[str] = []
+    if not dsr_agent > dsr_threshold:
+        failures.append(
+            f"dsr_agent={dsr_agent:.3f} <= dsr_threshold={dsr_threshold:.2f}"
+        )
+    if not sharpe_agent > 0.0:
+        failures.append(f"sharpe_agent={sharpe_agent:.3f} <= 0")
+
+    passed = not failures
+    suffix = (
+        f"(benchmark=ZERO, n_trials={n_trials}, n_oos_bars={n_oos}"
+        + (f", dsr_control={dsr_control:.3f}" if control_returns is not None else "")
+        + ")"
+    )
+    if passed:
+        reason = (
+            f"PASS: dsr_agent={dsr_agent:.3f} > {dsr_threshold:.2f}, "
+            f"sharpe_agent={sharpe_agent:.3f} > 0 {suffix}"
+        )
+    else:
+        reason = f"FAIL: {'; '.join(failures)} {suffix}"
+
+    return GateResult(
+        dsr_agent=float(dsr_agent),
+        psr_agent=float(psr_agent),
+        sharpe_agent=float(sharpe_agent),
+        sharpe_buyhold=0.0,
+        dsr_xgb=float(dsr_control),
+        n_trials=int(n_trials),
+        n_oos_bars=n_oos,
+        passed=passed,
+        reason=reason,
+    )

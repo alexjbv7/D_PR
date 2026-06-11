@@ -32,6 +32,7 @@ dependencies = [
 data = [
     "ccxt>=4.0",
     "yfinance>=0.2.50",
+    "alpaca-py>=0.20",
 ]
 dashboard = [
     "streamlit>=1.35",

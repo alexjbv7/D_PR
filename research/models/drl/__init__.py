@@ -41,6 +41,7 @@ _EXPORTS: dict[str, str] = {
     "MIN_EMBARGO_BARS": "models.drl.dsr_gate",
     "buyhold_oos_returns": "models.drl.dsr_gate",
     "evaluate_drl_gate": "models.drl.dsr_gate",
+    "evaluate_zero_gate": "models.drl.dsr_gate",
     "make_wf_splitter": "models.drl.dsr_gate",
     "positions_to_returns": "models.drl.dsr_gate",
     "walk_forward_oos_returns": "models.drl.dsr_gate",
