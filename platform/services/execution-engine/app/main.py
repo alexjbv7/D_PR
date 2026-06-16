@@ -305,13 +305,19 @@ async def lifespan(app: FastAPI):
     )
     await state.service.start()
 
-    # 6. Kafka loop (only if at least one adapter connected)
-    if state.router.venues():
-        state.kafka_consumer_task = asyncio.create_task(
-            _consume_signals(state, settings), name="kafka-consumer",
+    # 6. Kafka loop — always start so signals are consumed even before adapters connect.
+    # FIX(kafka-gate): the original guard `if state.router.venues()` silently dropped
+    # all signals when API keys were absent (router empty → Kafka loop never started).
+    # The consumer now always runs; handle_signal() logs a clear error per-signal
+    # when no adapter is available, making the failure visible in metrics/logs.
+    if not state.router.venues():
+        logger.warning(
+            "no broker adapters registered — signals will be consumed but rejected. "
+            "Set ALPACA_API_KEY / CCXT_API_KEY in .env to enable execution."
         )
-    else:
-        logger.warning("no broker adapters connected — Kafka loop NOT started")
+    state.kafka_consumer_task = asyncio.create_task(
+        _consume_signals(state, settings), name="kafka-consumer",
+    )
 
     logger.info("execution-engine.started port=%d", settings.port)
     yield

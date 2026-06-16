@@ -1,0 +1,16 @@
+# Convenience wrapper for the training container (see Dockerfile.brev).
+#   docker compose -f docker-compose.brev.yml build
+#   docker compose -f docker-compose.brev.yml run --rm train            # full run
+#   docker compose -f docker-compose.brev.yml run --rm train --smoke    # quick check
+services:
+  train:
+    build:
+      context: .
+      dockerfile: Dockerfile.brev
+    image: quant_bot:brev
+    env_file: .env            # ALPACA keys; never commit .env
+    shm_size: "1g"
+    gpus: all                 # needs NVIDIA Container Toolkit on the host
+    volumes:
+      - ./research/artifacts/runs:/workspace/quant_bot/research/artifacts/runs
+    command: ["python", "-m", "pipelines.train_all", "--device", "cpu", "--n-jobs", "8"]

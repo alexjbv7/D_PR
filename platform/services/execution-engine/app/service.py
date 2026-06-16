@@ -114,7 +114,21 @@ class ExecutionService:
         """
         self._counters["signals_seen"] += 1
 
-        venue = signal.get("venue") or self._default_venue_for(signal["symbol"])
+        symbol = signal.get("symbol", "")
+        venue = signal.get("venue") or self._default_venue_for(symbol)
+
+        # Guard: if the resolved venue has no registered adapter, log and count
+        # so the failure shows up in /health and Prometheus — not a silent drop.
+        # FIX(venue-routing): prevents 0-trade weeks when API keys are absent.
+        registered = self.router.venues()
+        if venue not in registered:
+            self._counters["rejected"] += 1
+            logger.error(
+                "service.venue_not_registered venue=%s registered=%s symbol=%s"
+                " — set API key and restart to enable execution",
+                venue, registered, symbol,
+            )
+            return None
 
         try:
             account = await self._account_for(venue)
@@ -122,7 +136,7 @@ class ExecutionService:
             logger.error("service.account_unreachable venue=%s err=%s", venue, exc)
             return None
 
-        last_price = await self._last_price_for(venue, signal["symbol"])
+        last_price = await self._last_price_for(venue, symbol)
 
         intent = translate_signal(
             signal,
@@ -131,6 +145,12 @@ class ExecutionService:
             default_venue=venue,
         )
         if intent is None:
+            logger.debug(
+                "service.signal_no_intent symbol=%s venue=%s "
+                "direction=%s position_size=%s price=%s",
+                symbol, venue,
+                signal.get("direction"), signal.get("position_size"), last_price,
+            )
             return None
         self._counters["intents_built"] += 1
 

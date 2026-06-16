@@ -7,6 +7,8 @@ con el mercado, sin necesidad de labelear manualmente la dirección del precio.
 Opera en **paper trading sobre Alpaca** (run activo: 2026-05-20 → 2026-06-19).
 
 > **Documento maestro**: [`CLAUDE.md`](CLAUDE.md) — arquitectura, ADRs, roadmap y reglas para agentes IA.  
+> **Cómo aprende el agente (explicado con analogías)**: [`ARQUITECTURA_Y_APRENDIZAJE.md`](ARQUITECTURA_Y_APRENDIZAJE.md) — empieza aquí si quieres entender el proceso de deep learning.  
+> **Bitácora de proceso y decisiones**: [`SEGUIMIENTO.md`](SEGUIMIENTO.md) — objetivo, hitos, el porqué de cada decisión, errores y lecciones.  
 > **Runbook de operación**: [`docs/runbooks/paper_trading_ops.md`](docs/runbooks/paper_trading_ops.md)
 
 ---
@@ -35,7 +37,9 @@ realmente supera al enfoque clásico.
 | Nightly retrain DAG | 🟢 Configurado | dry-run diario, gates DSR/ECE |
 | Observabilidad | 🟢 Activo | Prometheus + Grafana + 5 alert rules |
 | Q-learning tabular (MVP) | 🟡 Activo | Estado discretizado, acción {-1, 0, +1} |
-| DQN (siguiente paso) | 🔵 En diseño | Red neuronal como función Q |
+| DQN (Deep Q-Network) | 🟢 Entrena | Red neuronal Q; primer run serio SPY → DSR 0.85 (señal real) |
+| Gate DSR walk-forward | 🟢 Operativo | vs buy-and-hold + XGBoost; paralelizado (ADR-040) |
+| Reward mark-to-market | 🟢 Implementado | Alinea train/eval; premia montar tendencias (ADR-041) |
 | PPO / SAC (objetivo) | ⚪ Roadmap | Política continua, sizing fraccional |
 | Live trading | ⚪ No iniciado | Requiere 30d paper sin P0 + aprobación humana |
 
@@ -55,9 +59,10 @@ Estado (s):    vector de features de mercado + estado del portfolio
 Acción (a):    {-1 = vender, 0 = mantener, +1 = comprar}  ← MVP tabular
                → continua ∈ [-1, 1] = fracción de Kelly     ← PPO/SAC target
 
-Reward (r):    P&L realizado ajustado por riesgo
-               r_t = pnl_t - λ × volatility_t - c × |Δposition_t|
-               donde λ = aversión al riesgo, c = costos de transacción
+Reward (r):    Retorno mark-to-market por barra (ADR-041 — modo "mtm", default)
+               r_t = w_ret × (pos_{t-1} × ret_t) - w_cost × |Δpos_t| - w_dd×DD - w_vol×vol - w_idle×(flat prolongado)
+               Premia montar la posición cada barra (no solo al cerrar) y castiga
+               sostener perdedoras. Modo legacy "realized" (P&L realizado) disponible para A/B.
 
 Política (π):  red neuronal → mapea estado a distribución sobre acciones
 ```
@@ -294,6 +299,8 @@ curl -s http://localhost:8080/health | python3 -m json.tool | grep kill_switch
 | 010 | UTC + Decimal + UUID v7 |
 | 034 | ResMLP como backbone de policy/value network |
 | 035 | SLO: risk gate < 20ms, broker RTT < 600ms |
+| 040 | Gate de promoción DSR walk-forward (vs buy-and-hold + XGBoost; GMM por fold) |
+| 041 | Reward shaping mark-to-market (alinea train/eval; enmienda anti-patrón ADR-037) |
 
 ---
 

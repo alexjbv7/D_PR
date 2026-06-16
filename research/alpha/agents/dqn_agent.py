@@ -203,6 +203,9 @@ class DqnAlphaAgent:
             direction=_ACTION_TO_DIRECTION[action],
             p_win=p_win,
             p_win_raw=p_win_raw,
+            # Honestidad de calibración (R-02.c): solo True si se aplicó un calibrador
+            # OOS. Sin calibrador, p_win == softmax crudo → NO usable en Kelly.
+            p_win_calibrated=self._calibrator is not None,
             # Regla dura ADR-042 §3.1 / ADR-009: el agente NUNCA dimensiona capital.
             kelly_fraction=0.0,
             size_usd=0.0,

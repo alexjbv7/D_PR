@@ -435,3 +435,126 @@ def split_train_for_calibration(
         f"(frac={calib_frac:.0%})"
     )
     return X_fit, y_fit, X_calib, y_calib
+
+
+# =====================================================================
+# CALIBRADOR ESCALAR 1D — para señales con un único score de confianza
+# =====================================================================
+
+class ScalarProbabilityCalibrator:
+    """
+    Calibrador 1D ``p_raw -> P(win)`` para señales con un ÚNICO score de
+    confianza por muestra (E3 paso 2, arbitraje D).
+
+    A diferencia de ``IsotonicCalibrator`` (OvR multiclase sobre
+    ``predict_proba``), aquí el input es un escalar: la confianza de la acción
+    elegida (p.ej. ``softmax(Q)[a]`` del DQN — un proxy ordinal, NO una
+    probabilidad). Aprende una función monótona ``p_raw -> frecuencia empírica de
+    acierto`` sobre un conjunto de calibración OOS por fold.
+
+    Anti-leakage (NO negociable): ajustar SOLO sobre el slice de calibración
+    (``TRAIN_calib``, posterior a ``TRAIN_fit``), NUNCA con outcomes de ``TEST``.
+    Ver el protocolo ``[TRAIN_fit | TRAIN_calib | embargo | TEST]`` arriba.
+
+    Expone ``__call__(p: float) -> float`` para encajar directamente como
+    ``DqnAlphaAgent(calibrator=...)``; al cablearlo, el agente marca
+    ``TradeSignal.p_win_calibrated=True`` (habilita el guard de sizing, R-02).
+
+    Parameters
+    ----------
+    method : 'isotonic' | 'sigmoid'
+        'isotonic' = IsotonicRegression no-paramétrica (>= ``min_samples_isotonic``;
+        si hay menos, cae a 'sigmoid' automáticamente). 'sigmoid' = Platt 1D
+        (LogisticRegression), válido con pocas muestras.
+    min_samples_isotonic : int
+        Umbral de muestras para usar isotónica; por debajo usa sigmoid.
+
+    Examples
+    --------
+    >>> cal = ScalarProbabilityCalibrator(method="isotonic").fit(p_raw, outcomes)
+    >>> p_cal = cal(0.61)            # escalar -> escalar, en [0, 1]
+    """
+
+    def __init__(self, method: str = "isotonic", min_samples_isotonic: int = 80):
+        if method not in ("isotonic", "sigmoid"):
+            raise ValueError(f"method debe ser 'isotonic' o 'sigmoid', no '{method}'")
+        self.method = method
+        self.min_samples_isotonic = min_samples_isotonic
+        self._cal = None
+        self._kind: Optional[str] = None   # 'isotonic' | 'sigmoid' | 'constant'
+        self._constant: float = 0.5
+        self._fitted = False
+
+    def fit(self, p_raw, outcomes) -> "ScalarProbabilityCalibrator":
+        """
+        Ajusta sobre pares ``(p_raw, outcome)`` del slice de calibración.
+
+        Parameters
+        ----------
+        p_raw : array-like de float en [0, 1]
+            Confianza cruda de la acción elegida por muestra (softmax de Q).
+        outcomes : array-like de {0, 1}
+            1 = la apuesta direccional resultó ganadora, 0 = perdedora.
+        """
+        p = np.asarray(p_raw, dtype=float).ravel()
+        y = np.asarray(outcomes, dtype=float).ravel()
+        if p.shape != y.shape:
+            raise ValueError(f"p_raw {p.shape} y outcomes {y.shape} deben alinear")
+        if len(p) == 0:
+            raise ValueError("conjunto de calibración vacío")
+
+        # Degenerado: una sola clase de outcome -> mapeo constante (sin crash).
+        if np.unique(y).size < 2:
+            self._kind = "constant"
+            self._constant = float(np.clip(y.mean(), 0.0, 1.0))
+            self._fitted = True
+            logger.warning(
+                "ScalarProbabilityCalibrator: outcomes de una sola clase "
+                "(%d muestras) -> mapeo constante = %.3f", len(y), self._constant
+            )
+            return self
+
+        method = self.method
+        if method == "isotonic" and len(p) < self.min_samples_isotonic:
+            logger.warning(
+                "Calibración pequeña (%d < %d) -> usando 'sigmoid' en vez de "
+                "'isotonic'.", len(p), self.min_samples_isotonic
+            )
+            method = "sigmoid"
+
+        if method == "isotonic":
+            cal = IsotonicRegression(out_of_bounds="clip")
+            cal.fit(p, y)
+        else:
+            cal = LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000)
+            cal.fit(p.reshape(-1, 1), y)
+
+        self._cal = cal
+        self._kind = method
+        self._fitted = True
+        logger.info(
+            "ScalarProbabilityCalibrator %s ajustado sobre %d muestras "
+            "(tasa de acierto base = %.3f).", method, len(p), float(y.mean())
+        )
+        return self
+
+    def transform(self, p_raw) -> np.ndarray:
+        """Calibra un array de scores crudos -> probabilidades en [0, 1]."""
+        if not self._fitted:
+            raise RuntimeError("Llama a .fit() antes de transform/__call__")
+        p = np.asarray(p_raw, dtype=float).ravel()
+        if self._kind == "constant":
+            out = np.full(p.shape, self._constant, dtype=float)
+        elif self._kind == "isotonic":
+            out = self._cal.predict(p)
+        else:  # sigmoid
+            out = self._cal.predict_proba(p.reshape(-1, 1))[:, 1]
+        return np.clip(out, 0.0, 1.0)
+
+    def __call__(self, p: float) -> float:
+        """Calibra un score escalar (firma de ``DqnAlphaAgent(calibrator=...)``)."""
+        return float(self.transform([float(p)])[0])
+
+    @property
+    def is_fitted(self) -> bool:
+        return self._fitted

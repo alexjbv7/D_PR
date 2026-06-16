@@ -1,0 +1,40 @@
+# Keep secrets, venvs, caches and big data OUT of the image build context.
+# (COPY . in Dockerfile.brev would otherwise bake them into image layers.)
+
+# --- secrets: never bake credentials into an image ---
+.env
+*.env
+!.env.example
+
+# --- version control / CI ---
+.git
+.github
+
+# --- Windows/local virtualenvs (broken on Linux, huge) ---
+.venv-1
+quant_bot_env
+.venv
+venv
+
+# --- python caches / build ---
+**/__pycache__
+*.pyc
+*.pyo
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.benchmarks
+*.egg-info
+build
+dist
+
+# --- frontend ---
+**/node_modules
+
+# --- large/generated artifacts (mount these at runtime instead) ---
+data
+**/*.parquet
+artifacts
+plots
+reports
+*.log

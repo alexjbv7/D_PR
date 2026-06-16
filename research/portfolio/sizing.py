@@ -45,10 +45,35 @@ import numpy as np
 from scipy.stats import norm
 
 from quant_shared.contracts import SizeDecision
+from quant_shared.schemas.signals import TradeSignal, require_calibrated_signal
 from risk.dynamic_rr import compute_dynamic_rr
 from risk.kelly import kelly_fraction_binary
 
 _METHOD = "vol_target·frac_kelly·regime·cvar"
+
+
+def edge_posterior_from_signal(signal: TradeSignal) -> float:
+    """
+    Convierte una ``TradeSignal`` en el ``edge_posterior`` para ``size()``,
+    RECHAZANDO señales con ``p_win`` sin calibrar (arbitraje D / R-02.b).
+
+    Es el ÚNICO punto autorizado para alimentar Kelly desde una señal: pone el
+    "seguro" al cable ``p_win``→Kelly. Si la señal no fue calibrada OOS lanza
+    ``UncalibratedSignalError`` en vez de propagar un softmax crudo al sizing de
+    capital. Para sizing sin Kelly (vol-target puro) no se usa esta función.
+
+    Parameters
+    ----------
+    signal : TradeSignal
+        Señal con ``p_win`` y ``p_win_calibrated``.
+
+    Returns
+    -------
+    float
+        ``signal.p_win`` (ya calibrado) listo para ``size(edge_posterior=...)``.
+    """
+    require_calibrated_signal(signal)
+    return float(signal.p_win)
 
 
 @dataclass(frozen=True)
@@ -129,6 +154,10 @@ class StackedPositionSizer:
             Posterior de P(win): punto, tupla, o distribución (p.ej.
             ``scipy.stats.beta`` ajustada desde ``bayesian_sizer``). Mayor
             incertidumbre → edge efectivo menor → menos tamaño.
+            **DEBE provenir de una fuente CALIBRADA** (arbitraje D / R-02): cuando
+            el edge venga de una ``TradeSignal``, constrúyelo con
+            ``edge_posterior_from_signal(signal)``, que rechaza ``p_win`` sin
+            calibrar. Nunca pasar aquí un softmax de Q-values crudo.
 
         Returns
         -------

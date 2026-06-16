@@ -1,0 +1,34 @@
+# Reproducible image to train the full quant_bot stack on a GPU VM.
+# NGC base ships CUDA + a tuned PyTorch; we add the repo and its data deps.
+#
+#   Build:  docker build -f Dockerfile.brev -t quant_bot:brev .
+#   Run:    docker run --gpus all --shm-size=1g \
+#               --env-file .env \
+#               -v "$PWD/research/artifacts/runs:/workspace/quant_bot/research/artifacts/runs" \
+#               quant_bot:brev \
+#               python -m pipelines.train_all --device cpu --n-jobs "$(nproc)"
+#
+# Secrets are NEVER baked in: .dockerignore excludes .env — pass keys at runtime
+# via --env-file / -e. Outputs are ephemeral inside the container — mount a
+# volume for research/artifacts/runs or you lose the JSON when it exits.
+FROM nvcr.io/nvidia/pytorch:24.10-py3
+
+WORKDIR /workspace/quant_bot
+COPY . /workspace/quant_bot
+
+# Install the repo with its declared deps ([data] = ccxt/yfinance/alpaca-py).
+# The base image's CUDA torch already satisfies torch>=2.0, so pip keeps it —
+# do NOT `pip install -U torch` here or you replace the tuned build. The final
+# import line fails the build early if a dep upgraded numpy and broke the ABI.
+RUN python -m pip install -U pip wheel && \
+    python -m pip install -e ./shared && \
+    python -m pip install -e "./research[data]" && \
+    python -c "import torch, xgboost, gymnasium, sklearn; print('torch', torch.__version__)"
+
+ENV PYTHONUNBUFFERED=1
+WORKDIR /workspace/quant_bot/research
+
+# Default CMD = full run. The small DRL nets are usually fastest on CPU-parallel,
+# so override device/n-jobs at `docker run` (see header). GPU helps the
+# supervised ResMLP/LSTM stage: append `--stages supervised --device cuda`.
+CMD ["python", "-m", "pipelines.train_all", "--device", "cpu", "--n-jobs", "4"]

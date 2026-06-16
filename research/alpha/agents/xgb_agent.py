@@ -150,6 +150,9 @@ class XgbAlphaAgent:
             direction=_LABEL_TO_DIRECTION[label],
             p_win=p_win,
             p_win_raw=p_win,  # sin meta-labeler en esta capa
+            # Honestidad de calibración (R-02.c): el XGBoostClassifier devuelve
+            # proba calibrada solo si se llamó .calibrate(); refleja ese estado real.
+            p_win_calibrated=bool(getattr(self._model, "is_calibrated", False)),
             # Regla dura ADR-042 §3.1 / ADR-009: el agente NUNCA dimensiona capital.
             kelly_fraction=0.0,
             size_usd=0.0,
