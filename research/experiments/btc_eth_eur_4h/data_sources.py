@@ -166,6 +166,9 @@ def load_fx_yfinance(
     out = _resample_ohlcv(raw, timeframe)
     if out.empty:
         raise RuntimeError(f"no {timeframe} bars after resampling {symbol}")
+    if "volume" in out.columns and float(out["volume"].fillna(0).abs().sum()) == 0.0:
+        rng = (out["high"] - out["low"]).abs()
+        out["volume"] = rng.mask(rng <= 0).ffill().bfill().fillna(1.0)
     logger.info(
         "loaded FX %s: %d %s bars [%s .. %s]",
         symbol, len(out), timeframe, out.index.min().date(), out.index.max().date(),

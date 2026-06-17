@@ -470,7 +470,7 @@ def walk_forward_oos_returns(
             len(jobs), n_jobs, threads_per_worker,
         )
         results = []
-        with ProcessPoolExecutor(max_workers=n_jobs) as pool:
+        with ProcessPoolExecutor(max_workers=n_jobs, mp_context=__import__("multiprocessing").get_context("spawn")) as pool:
             futures = [
                 pool.submit(
                     _train_eval_one_fold,
