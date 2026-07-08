@@ -1,42 +1,77 @@
-# Los Ojos — memoria de proyecto (pointer)
+# Los Ojos — memoria de proyecto (integrado en el monorepo)
 
-Este repositorio (**los_ojos**) es la **Fase 2** de PROJECT ML: microservicios de inteligencia financiera, Kafka, Redis, TimescaleDB y dashboard. La documentación de convenciones y el núcleo ML viven en el repo hermano **`quant_bot`** (guión bajo, sin espacio), carpeta típica:
+**Los Ojos** fue originalmente un repositorio separado (`C:\Users\alexj\OneDrive\Desktop\los_ojos\`),
+hermano de `quant_bot`. Ambos fueron fusionados en el monorepo **PROJECT ML** (ver
+`CLAUDE.md` raíz, cabecera "MONOREPO"): esta carpeta, **`platform/`**, es hoy
+Los Ojos. Ya no existe como repo independiente — no busques rutas relativas a
+`../quant_bot/` ni a un checkout separado de `los_ojos/`.
 
-`C:\Users\alexj\OneDrive\Desktop\quant_bot\`
+Mapa de las tres capas del monorepo (ver `CLAUDE.md` §0 / §15.1):
 
-Ahí tienes al menos:
+| Carpeta | Antes era | Contenido |
+|---------|-----------|-----------|
+| `research/` | `quant_bot/` | I+D, backtesting, entrenamiento ML |
+| `platform/` (aquí) | `los_ojos/` | 8+ microservicios FastAPI, frontend React, Kafka, Redis |
+| `shared/` | — (nuevo) | Librería `quant_shared`: features canónicos, schemas Kafka, model registry |
+
+## Qué leer
 
 | Archivo | Rol |
 |---------|-----|
-| **`CLAUDE.md`** | Manual técnico interno: arquitectura objetivo, estrategias, riesgo, roadmap, reglas para agentes — **fuente de verdad** para PROJECT ML. |
-| **`README.md`** | Entrada del repo: setup rápido, visión general, enlaces útiles. |
+| `../CLAUDE.md` | Manual técnico interno completo — arquitectura, estrategias, riesgo, roadmap, reglas para agentes. **Fuente de verdad única** para todo el monorepo. |
+| `../README.md` | Entrada del repo: setup rápido, visión general. |
 
-**Enlaces locales** (desde `los_ojos`, hermanos en el mismo Desktop):
+Secciones relevantes de `CLAUDE.md` para esta carpeta:
 
-- [`../quant_bot/CLAUDE.md`](../quant_bot/CLAUDE.md)
-- [`../quant_bot/README.md`](../quant_bot/README.md)
-
-## Qué leer en `CLAUDE.md`
-
-| Sección | Contenido relevante para Los Ojos |
+| Sección | Contenido relevante para `platform/` (Los Ojos) |
 |---------|-----------------------------------|
-| §5 | Capa “Los Ojos”: servicios, puertos, stack |
-| §15.1 | Estructura de **ambos** repos (`quant_bot/` vs `los_ojos/`) |
-| §10 | Arquitectura de eventos Kafka (**convención target** `raw.*` / `features.*`; Los Ojos usa `los_ojos.*` en Makefile — alinear con código) |
-| §11–12 | Motor de ejecución y risk (**target**; executor/risk-engine aún no equivalentes en este repo) |
+| §5 | Capa "Los Ojos": servicios, puertos, stack |
+| §15.1 | Estructura del monorepo (`research/` / `platform/` / `shared/`) |
+| §10 | Arquitectura de eventos Kafka (Los Ojos usa prefijo `los_ojos.*` en topics; convención target del monorepo es `<domain>.<entity>.<action>` — ver migración de schemas abajo) |
+| §11–12 | Motor de ejecución y risk (`execution-engine` en esta carpeta ya implementa buena parte de esto; ver `services/execution-engine/`) |
 | §18 | Roadmap (checkboxes Fase 2–3) |
 
 ## Núcleo ML (research)
 
-Walk-forward, model zoo, calibración, meta-labeling, Bayesian sizing, etc. están en **quant_bot** (`models/`, `risk/`, `features/`). Los Ojos consume vectores de features y emite señales; la inferencia “institucional” descrita en `CLAUDE.md` debe **integrarse** (servicio `ml-inference` / artefactos desde quant_bot) según roadmap §18.3.
+Walk-forward, model zoo, calibración, meta-labeling, Bayesian sizing, etc.
+viven en **`../research/`** (`models/`, `risk/`, `features/`). `platform/`
+consume vectores de features y emite señales; la inferencia "institucional"
+descrita en `CLAUDE.md` se integra vía artefactos de `research/` cargados por
+servicios como `ml-feature-store` y `execution-engine`, según roadmap §18.3.
+
+## Migración de schemas en curso
+
+Los eventos Kafka se están moviendo de `platform/libs/shared/events.py` hacia
+`shared/quant_shared/schemas/events.py` (fuente de verdad nueva del monorepo).
+`platform/libs/shared/events.py` re-exporta desde ahí por compatibilidad
+temporal. Los servicios deben migrar gradualmente sus imports:
+
+```python
+# antes
+from libs.shared.events import MarketDataEvent
+# después
+from quant_shared.schemas.events import MarketDataEvent
+```
+
+## Servicios en esta carpeta (`platform/services/`)
+
+Incluye los 7 servicios originales documentados en `CLAUDE.md` §5.0
+(`market-intelligence`, `macroeconomic`, `onchain-analysis`, `context-engine`,
+`realtime-signal`, `ml-feature-store`, `strategy-orchestrator`) más servicios
+añadidos después de esa documentación: `execution-engine`, `sec-research`,
+`openbb-adapter`. Si `CLAUDE.md` §5.0 no los lista, el código manda — actualizar
+esa tabla o abrir un ADR si el gap es arquitectónicamente relevante.
 
 ## Convención para agentes
 
-1. **`quant_bot/README.md`** primero si necesitas contexto breve del monolito ML.  
-2. **`quant_bot/CLAUDE.md`** para arquitectura, estrategias, riesgo y roadmap en detalle.  
-3. Código y **`infra/sql/schema.sql`** en **los_ojos** para el estado real del stack desplegado aquí.  
-4. Si hay divergencia doc ↔ código, priorizar el código y anotar el gap en un PR o ADR en **quant_bot**.
+1. **`../README.md`** primero si necesitas contexto breve del monorepo.
+2. **`../CLAUDE.md`** para arquitectura, estrategias, riesgo y roadmap en detalle.
+3. Código y `infra/sql/` / `infra/kafka/topics.yml` en esta carpeta para el
+   estado real del stack desplegado.
+4. Si hay divergencia doc ↔ código, priorizar el código y anotar el gap en un
+   PR o ADR en `docs/adr/`.
 
 ---
 
-*Última actualización: alinear con `CLAUDE.md` del mismo día que editaste PROJECT ML.*
+*Última actualización: 2026-07-08 — corregido para reflejar la fusión a
+monorepo (ya no es un repo independiente; ver cabecera de `CLAUDE.md`).*
