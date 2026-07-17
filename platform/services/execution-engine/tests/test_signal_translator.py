@@ -17,6 +17,7 @@ def _signal(**overrides):
         "symbol":        "BTCUSDT",
         "direction":     1,
         "p_win":         0.6,
+        "p_win_calibrated": True,  # Y-004: Kelly path requires calibrated edge
         "position_size": 0.02,
         "target_risk_pct": 0.01,
         "ts":            "2026-05-17T17:00:00+00:00",
@@ -128,6 +129,23 @@ def test_zero_kelly_returns_none():
     assert translate_signal(
         _signal(position_size=0), equity=Decimal("100000"),
         current_price=Decimal("65000"),
+    ) is None
+
+
+def test_uncalibrated_kelly_returns_none():
+    """Y-004: position_size as Kelly is blocked without p_win_calibrated."""
+    assert translate_signal(
+        _signal(p_win_calibrated=False),
+        equity=Decimal("100000"),
+        current_price=Decimal("1000"),
+        default_venue="binance",
+    ) is None
+    missing_flag = {k: v for k, v in _signal().items() if k != "p_win_calibrated"}
+    assert translate_signal(
+        missing_flag,
+        equity=Decimal("100000"),
+        current_price=Decimal("1000"),
+        default_venue="binance",
     ) is None
 
 

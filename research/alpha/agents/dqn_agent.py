@@ -39,8 +39,9 @@ frequency-calibrated.
 from __future__ import annotations
 
 import hashlib
+import logging
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import numpy as np
 import torch
@@ -62,6 +63,15 @@ from quant_shared.contracts import (
     TradingStyle,
 )
 from quant_shared.schemas.signals import SignalDirection, TradeSignal
+
+if TYPE_CHECKING:  # pragma: no cover
+    import pandas as pd
+    from envs.trading_env import EnvironmentConfig
+
+logger = logging.getLogger(__name__)
+
+#: Sidecar filename pattern: ``dqn_ep00500_calibrator.joblib`` next to ``dqn_ep00500.pt``.
+_CALIBRATOR_SUFFIX = "_calibrator.joblib"
 
 #: Falsifiable identity of this module (ADR-042; CATALOGO_ALPHA_HIPOTESIS.md).
 DQN_HYPOTHESIS = AlphaHypothesis(
@@ -151,6 +161,8 @@ class DqnAlphaAgent:
         path: Path,
         net: TradingDQN | None = None,
         calibrator: Optional[Callable[[float], float]] = None,
+        *,
+        load_sidecar_calibrator: bool = True,
     ) -> "DqnAlphaAgent":
         """
         Load a ``DQNTrainer`` checkpoint and wrap its online net.
@@ -166,15 +178,72 @@ class DqnAlphaAgent:
             Pre-built net matching the checkpoint architecture; ``None`` uses
             the default ``TradingDQN()`` dimensions.
         calibrator : callable, optional
-            See ``__init__``.
+            See ``__init__``. If None and ``load_sidecar_calibrator``, loads
+            ``{checkpoint_stem}_calibrator.joblib`` when present (A-003).
+        load_sidecar_calibrator : bool
+            Auto-load OOS calibrator sidecar next to the checkpoint (default True).
         """
         from models.drl.dqn_trainer import DQNTrainer
 
-        trainer = DQNTrainer.load_checkpoint(Path(path), online_net=net)
+        ckpt = Path(path)
+        trainer = DQNTrainer.load_checkpoint(ckpt, online_net=net)
+        if calibrator is None and load_sidecar_calibrator:
+            calibrator = _load_calibrator_sidecar(ckpt)
         return cls(
             trainer.online_net,
-            model_version=Path(path).name,
+            model_version=ckpt.name,
             calibrator=calibrator,
+        )
+
+    @classmethod
+    def from_checkpoint_calibrated(
+        cls,
+        path: Path,
+        calib_df: "pd.DataFrame",
+        env_cfg: "EnvironmentConfig",
+        *,
+        seed: int = 0,
+        net: TradingDQN | None = None,
+        method: str = "isotonic",
+        save_sidecar: bool = True,
+    ) -> "DqnAlphaAgent":
+        """
+        Load checkpoint, fit OOS calibrator on ``calib_df``, wire the hook (A-003).
+
+        Protocol (anti-leakage)::
+
+            [ TRAIN_fit | TRAIN_calib | embargo | TEST ]
+            fit DQN on TRAIN_fit → fit calibrator on TRAIN_calib → serve on TEST
+
+        ``calib_df`` must be the calibration slice only (never TEST).
+
+        Parameters
+        ----------
+        path : Path
+            DQNTrainer checkpoint.
+        calib_df : pd.DataFrame
+            Env-ready bars for calibration (disjoint from TEST).
+        env_cfg : EnvironmentConfig
+            Same env config as training/gate.
+        seed : int
+            Deterministic rollout seed for calibration pairs.
+        save_sidecar : bool
+            Persist calibrator next to checkpoint for ``from_checkpoint`` auto-load.
+        """
+        from models.drl.dqn_trainer import DQNTrainer
+        from alpha.agents.dqn_calibration import fit_dqn_fold_calibrator
+
+        ckpt = Path(path)
+        trainer = DQNTrainer.load_checkpoint(ckpt, online_net=net)
+        cal = fit_dqn_fold_calibrator(
+            trainer, calib_df, env_cfg, seed=seed, method=method
+        )
+        if save_sidecar:
+            _save_calibrator_sidecar(ckpt, cal)
+        return cls(
+            trainer.online_net,
+            model_version=ckpt.name,
+            calibrator=cal,
         )
 
     def predict(self, context: MarketContext) -> TradeSignal:
@@ -240,3 +309,32 @@ def _hash_obs_layout() -> str:
     """Deterministic hash of the env observation layout (market + regime)."""
     names = [c or "_reserved" for c in _MARKET_COLS] + list(_REGIME_COLS)
     return hashlib.sha256(",".join(names).encode("utf-8")).hexdigest()[:16]
+
+
+def calibrator_sidecar_path(checkpoint: Path) -> Path:
+    """Path of the OOS calibrator sidecar for a DQN checkpoint (A-003)."""
+    p = Path(checkpoint)
+    return p.with_name(p.stem + _CALIBRATOR_SUFFIX)
+
+
+def _save_calibrator_sidecar(checkpoint: Path, calibrator: object) -> Path:
+    """Persist fitted ScalarProbabilityCalibrator next to the checkpoint."""
+    import joblib
+
+    out = calibrator_sidecar_path(checkpoint)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(calibrator, out)
+    logger.info("A-003 calibrator sidecar saved → %s", out)
+    return out
+
+
+def _load_calibrator_sidecar(checkpoint: Path) -> Optional[Callable[[float], float]]:
+    """Load calibrator sidecar if present; else None."""
+    import joblib
+
+    path = calibrator_sidecar_path(checkpoint)
+    if not path.is_file():
+        return None
+    cal = joblib.load(path)
+    logger.info("A-003 calibrator sidecar loaded ← %s", path)
+    return cal

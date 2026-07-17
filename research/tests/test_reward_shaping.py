@@ -171,6 +171,62 @@ def test_reward_mode_invalid_raises() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_y002_vol_penalty_not_dead() -> None:
+    """
+    Y-002 regression: vol_target must not equal realized-of-same-bar, otherwise
+    ``w_vol * max(0, vol_r - vol_t)`` is always 0.
+    """
+    # Pure function: excess realized vol must make reward strictly worse.
+    base_kw = dict(
+        prev_position=0.0,
+        price_return=0.0,
+        delta_position=0.0,
+        fee_bps=0.0,
+        drawdown=0.0,
+        position=0.0,
+        flat_bars=0,
+        w_ret=1.0,
+        w_cost=0.0,
+        w_dd=0.0,
+        w_vol=1.0,
+        w_idle=0.0,
+        max_flat_bars=999,
+    )
+    r_ok = compute_reward_mtm(vol_realized=0.01, vol_target=0.01, **base_kw)
+    r_hi = compute_reward_mtm(vol_realized=0.05, vol_target=0.01, **base_kw)
+    assert r_hi < r_ok
+    assert r_hi == pytest.approx(-0.04)
+
+    # Env step must use EnvironmentConfig.vol_target, not vol_realized.
+    n = 40
+    closes = np.full(n, 100.0)
+    idx = pd.date_range("2024-01-01", periods=n, freq="1D", tz="UTC")
+    data = pd.DataFrame(
+        {
+            "close": closes,
+            "vol_realized_20": np.full(n, 0.05),  # high realized
+        },
+        index=idx,
+    )
+    cfg = EnvironmentConfig(
+        reward_mode="mtm",
+        fee_bps=0.0,
+        vol_target=0.01,
+        w_vol=1.0,
+        w_ret=0.0,
+        w_cost=0.0,
+        w_dd=0.0,
+        w_idle=0.0,
+        episode_length=n - 1,
+    )
+    env = TradingEnvironment(data, config=cfg, seed=0)
+    env.reset(seed=0)
+    _, reward, _, _, _ = env.step(ACTION_HOLD)
+    assert reward == pytest.approx(-0.04), (
+        "Y-002: env must penalize vol_realized > config.vol_target"
+    )
+
+
 def test_reward_matches_gate_return_def() -> None:
     rng = np.random.default_rng(11)
     closes = 100.0 * np.cumprod(1.0 + rng.normal(0.0, 0.02, 50))

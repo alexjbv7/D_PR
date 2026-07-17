@@ -73,6 +73,7 @@ def translate_signal(
           * direction == 0 (flat)
           * current_price missing or non-positive
           * resulting notional < _MIN_NOTIONAL
+          * position_size > 0 without ``p_win_calibrated=True`` (Y-004 / R-02)
     """
     direction = int(signal.get("direction", 0) or 0)
     if direction == 0:
@@ -91,6 +92,17 @@ def translate_signal(
         logger.warning(
             "translator.zero_kelly symbol=%s — skipping signal",
             signal.get("symbol"),
+        )
+        return None
+
+    # Y-004: position_size is treated as a Kelly fraction → requires calibrated
+    # edge. Uncalibrated p_win (softmax Q, etc.) must not size capital.
+    if not bool(signal.get("p_win_calibrated", False)):
+        logger.warning(
+            "translator.uncalibrated_kelly_blocked symbol=%s strategy=%s — "
+            "set p_win_calibrated=True after OOS calibration (Y-004 / R-02)",
+            signal.get("symbol"),
+            signal.get("strategy"),
         )
         return None
 

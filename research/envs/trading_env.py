@@ -158,6 +158,10 @@ class EnvironmentConfig:
 
     # Compartido por ambos modos
     dd_threshold: float = 0.02
+    # Target de vol REALIZADA por barra (misma escala que feature ``vol_realized_20``:
+    # std de log-returns diarios ~0.01 ≈ 16% anualizado). NO debe igualarse a
+    # vol_realized en el mismo bar — eso anula el término w_vol (Y-002).
+    vol_target: float = 0.01
 
     # Reward legacy (ADR-037, reward_mode="realized")
     lambda_dd: float = 2.0
@@ -451,7 +455,9 @@ class TradingEnvironment(gym.Env):
             drawdown = max(0.0, (self._peak_equity - self._equity) / self._peak_equity)
 
         vol_realized = float(row.get("vol_realized_20", 0.0))
-        vol_target = vol_realized  # historical reference at t
+        # Y-002: fixed (or configured) target — never equal to realized-of-same-bar
+        # (that made r_vol ≡ 0 and w_vol dead).
+        vol_target = float(self.config.vol_target)
 
         if self.config.reward_mode == "mtm":
             reward = compute_reward_mtm(

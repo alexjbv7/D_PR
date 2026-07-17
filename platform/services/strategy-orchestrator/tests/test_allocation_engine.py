@@ -22,7 +22,7 @@ def _vols(*strategies):
 class TestPositionSizeFromSignal:
     def test_high_confidence_signal(self, engine):
         size = engine.position_size_from_signal(
-            p_win=0.65, stop_loss_pct=0.02, capital=100_000
+            p_win=0.65, stop_loss_pct=0.02, capital=100_000, p_win_calibrated=True
         )
         assert size > 0
         assert size <= 100_000 * 0.25
@@ -30,20 +30,44 @@ class TestPositionSizeFromSignal:
     def test_very_low_pwin_zero_position(self, engine):
         # Kelly break-even at stop=0.02 is ~p_win≈0.019; below that → 0
         size = engine.position_size_from_signal(
-            p_win=0.01, stop_loss_pct=0.02, capital=100_000
+            p_win=0.01, stop_loss_pct=0.02, capital=100_000, p_win_calibrated=True
         )
         assert size == 0.0
 
     def test_size_increases_with_pwin(self, engine):
         # Higher win probability → larger position
-        size_lo = engine.position_size_from_signal(0.55, 0.02, 100_000)
-        size_hi = engine.position_size_from_signal(0.75, 0.02, 100_000)
+        size_lo = engine.position_size_from_signal(
+            0.55, 0.02, 100_000, p_win_calibrated=True
+        )
+        size_hi = engine.position_size_from_signal(
+            0.75, 0.02, 100_000, p_win_calibrated=True
+        )
         assert size_hi > size_lo
 
     def test_respects_capital_proportionality(self, engine):
-        size_small = engine.position_size_from_signal(0.7, 0.02, 10_000)
-        size_large = engine.position_size_from_signal(0.7, 0.02, 100_000)
+        size_small = engine.position_size_from_signal(
+            0.7, 0.02, 10_000, p_win_calibrated=True
+        )
+        size_large = engine.position_size_from_signal(
+            0.7, 0.02, 100_000, p_win_calibrated=True
+        )
         assert size_large == pytest.approx(size_small * 10, rel=1e-2)
+
+    def test_uncalibrated_p_win_raises(self, engine):
+        """Y-003: Kelly on uncalibrated p_win must fail (regression)."""
+        from quant_shared.schemas.signals import UncalibratedSignalError
+
+        with pytest.raises(UncalibratedSignalError):
+            engine.position_size_from_signal(
+                p_win=0.65, stop_loss_pct=0.02, capital=100_000
+            )
+        with pytest.raises(UncalibratedSignalError):
+            engine.position_size_from_signal(
+                p_win=0.65,
+                stop_loss_pct=0.02,
+                capital=100_000,
+                p_win_calibrated=False,
+            )
 
 
 class TestComputeAllocations:

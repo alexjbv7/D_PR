@@ -14,6 +14,10 @@ _EXPORTS: dict[str, str] = {
     "DqnAlphaAgent": "alpha.agents.dqn_agent",
     "DQN_HYPOTHESIS": "alpha.agents.dqn_agent",
     "DQN_CONFIG": "alpha.agents.dqn_agent",
+    "calibrator_sidecar_path": "alpha.agents.dqn_agent",
+    # OOS calibration for DQN p_win (A-003)
+    "fit_dqn_fold_calibrator": "alpha.agents.dqn_calibration",
+    "collect_dqn_calibration_pairs": "alpha.agents.dqn_calibration",
     # XGBoost adapter (torch-free)
     "XgbAlphaAgent": "alpha.agents.xgb_agent",
     "XGB_HYPOTHESIS": "alpha.agents.xgb_agent",

@@ -96,6 +96,7 @@ def _signal(**overrides):
         "symbol":        "BTCUSDT",
         "direction":     1,
         "p_win":         0.6,
+        "p_win_calibrated": True,  # Y-004
         "position_size": 0.02,
     }
     base.update(overrides)

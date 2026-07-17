@@ -37,7 +37,8 @@ Exit codes
 ----------
     0  training completed and the walk-forward DSR gate PASSED (DQN).
     1  invalid configuration / insufficient data.
-    2  trained but the DSR gate FAILED — do not promote (DQN only).
+    2  trained but the DSR gate FAILED, or gate not implemented for this algo
+       (PPO/SAC always exit 2 until ADR-040 is extended — Y-001).
 
 Promotion gate (ADR-040)
 ------------------------
@@ -157,6 +158,48 @@ def _evaluate_dqn(trainer, eval_env, n_episodes: int = 20) -> float:
     return float(sum(rewards) / len(rewards)) if rewards else 0.0
 
 
+def _fit_and_save_dqn_calibrator(
+    *,
+    trainer,
+    train_data,
+    env_cfg: EnvironmentConfig,
+    checkpoint_dir: Path,
+    seed: int,
+    n_episodes: int,
+    calib_frac: float = 0.20,
+) -> Path:
+    """
+    A-003: fit p_win calibrator on the last ``calib_frac`` of train bars and
+    write sidecar next to a final DQN checkpoint.
+
+    Uses only train bars (last slice = TRAIN_calib). Never uses the held-out
+    eval/TEST fold of the single-split driver.
+    """
+    from alpha.agents.dqn_agent import _save_calibrator_sidecar
+    from alpha.agents.dqn_calibration import fit_dqn_fold_calibrator
+
+    n = len(train_data)
+    if n < 30:
+        raise ValueError(f"train_data too short for calibration ({n} bars)")
+    start = max(0, int(n * (1.0 - calib_frac)))
+    calib_df = train_data.iloc[start:]
+    if len(calib_df) < 10:
+        raise ValueError(f"calib slice too short: {len(calib_df)}")
+
+    ckpt_dir = Path(checkpoint_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    final_ckpt = trainer._save_checkpoint(ckpt_dir, n_episodes)
+    cal = fit_dqn_fold_calibrator(
+        trainer, calib_df, env_cfg, seed=seed, method="isotonic"
+    )
+    side = _save_calibrator_sidecar(final_ckpt, cal)
+    logger.info(
+        "A-003: calibrator fitted on train_calib bars [%d:%d] → %s",
+        start, n, side,
+    )
+    return side
+
+
 def _load_raw_ohlcv(args: argparse.Namespace):
     """Raw OHLCV frame: real Alpaca bars when --symbol, else synthetic stub."""
     symbol = getattr(args, "symbol", None)
@@ -247,6 +290,22 @@ def _run(args: argparse.Namespace) -> int:
         oos = _evaluate_dqn(trainer, eval_env, n_episodes=5)
         logger.info("Held-out OOS mean reward (greedy, diagnostic only): %.5f", oos)
 
+        # 1b) A-003: fit OOS p_win calibrator on a TRAIN_calib slice (last 20% of
+        # train bars) and persist sidecar next to a final checkpoint so
+        # DqnAlphaAgent.from_checkpoint auto-wires p_win_calibrated=True.
+        # 🔴 Invalidates prior signal validation if calibrator changes serve p_win.
+        try:
+            _fit_and_save_dqn_calibrator(
+                trainer=trainer,
+                train_data=train_env.data,
+                env_cfg=env_cfg,
+                checkpoint_dir=ckpt_dir,
+                seed=args.seed,
+                n_episodes=args.episodes,
+            )
+        except Exception as exc:  # noqa: BLE001 — training must still report gate
+            logger.warning("A-003 calibrator fit skipped: %s", exc)
+
         # 2) ADR-040 promotion gate: walk-forward DSR vs baselines.
         wf_folds = getattr(args, "wf_folds", 5)
         n_trials = getattr(args, "n_trials_searched", 1)
@@ -280,7 +339,14 @@ def _run(args: argparse.Namespace) -> int:
         ac = TradingActorCritic()
         trainer = PPOTrainer(ac, PPOConfig(device=args.device))
         trainer.train(train_env, n_updates=args.updates, checkpoint_dir=ckpt_dir)
-        edge = True  # TODO(@alex 2026-06-30): extend AgentSpec/DSR gate to PPO
+        elapsed = time.monotonic() - start_t
+        logger.info("Training done in %.1fs. Checkpoints → %s", elapsed, ckpt_dir)
+        # Y-001: ADR-040 gate not implemented for PPO — never auto-promote.
+        logger.warning(
+            "NO PROMOTE: algo=ppo has no DSR walk-forward gate yet "
+            "(extend AgentSpec/dsr_gate). Exit 2."
+        )
+        return 2
 
     else:  # sac
         from models.drl import SACConfig, SACTrainer, TradingDiscreteActor
@@ -288,16 +354,14 @@ def _run(args: argparse.Namespace) -> int:
         actor = TradingDiscreteActor()
         trainer = SACTrainer(actor, SACConfig(device=args.device))
         trainer.train(train_env, n_steps=args.steps, checkpoint_dir=ckpt_dir)
-        edge = True  # TODO(@alex 2026-06-30): extend AgentSpec/DSR gate to SAC
-
-    elapsed = time.monotonic() - start_t
-    logger.info("Training done in %.1fs. Checkpoints → %s", elapsed, ckpt_dir)
-
-    if edge:
-        logger.info("SUCCESS: training completed. Exit 0.")
-        return 0
-    logger.warning("NO EDGE: do not promote. Exit 2.")
-    return 2
+        elapsed = time.monotonic() - start_t
+        logger.info("Training done in %.1fs. Checkpoints → %s", elapsed, ckpt_dir)
+        # Y-001: ADR-040 gate not implemented for SAC — never auto-promote.
+        logger.warning(
+            "NO PROMOTE: algo=sac has no DSR walk-forward gate yet "
+            "(extend AgentSpec/dsr_gate). Exit 2."
+        )
+        return 2
 
 
 def main() -> None:

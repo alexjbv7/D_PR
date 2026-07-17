@@ -119,6 +119,7 @@ class TestSignalTranslator:
             "strategy": "regime_adaptive",
             "direction": 1,
             "p_win": 0.62,
+            "p_win_calibrated": True,  # Y-004: Kelly path requires calibration
             "position_size": 0.02,
             "venue": "alpaca",
             "confidence": 0.45,
@@ -203,6 +204,7 @@ class TestSignalTranslator:
             "symbol": "BTCUSDT",
             "direction": 1,
             "position_size": 0.02,
+            "p_win_calibrated": True,
             # NO venue field — old behaviour
         }
         result = self.translate(
@@ -253,6 +255,7 @@ class TestExecutionServiceVenueGuard:
             "symbol": "BTCUSDT",
             "direction": 1,
             "position_size": 0.02,
+            "p_win_calibrated": True,
             "venue": "binance",  # not registered
         }
         result = await svc.handle_signal(signal)
@@ -281,6 +284,7 @@ class TestExecutionServiceVenueGuard:
             "symbol": "BTC/USD",
             "direction": 1,
             "position_size": 0.02,
+            "p_win_calibrated": True,
             "venue": "alpaca",
         }
         # It will proceed past the venue guard; may fail at risk_gate or submit
@@ -314,6 +318,7 @@ class TestExecutionServiceVenueGuard:
                 "symbol": "AAPL",
                 "direction": 1,
                 "position_size": 0.02,
+                "p_win_calibrated": True,
                 # NO venue field
             }
             await svc.handle_signal(signal)

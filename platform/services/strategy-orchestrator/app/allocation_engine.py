@@ -129,13 +129,30 @@ class AllocationEngine:
         p_win:         float,
         stop_loss_pct: float,
         capital:       float | None = None,
+        *,
+        p_win_calibrated: bool = False,
     ) -> float:
         """
         Single-trade Kelly sizing from p_win and stop loss.
 
         f* = (p_win * (1/stop) - (1-p_win)) / (1/stop)
         Applied at kelly_fraction of full Kelly.
+
+        Parameters
+        ----------
+        p_win_calibrated : bool
+            Must be True. Kelly on uncalibrated p_win (e.g. softmax of Q-values)
+            is forbidden (R-02 / triaje Y-003). Callers that size from a
+            TradeSignal should pass ``signal.p_win_calibrated``.
         """
+        if not p_win_calibrated:
+            # Y-003: never feed raw ordinal confidence into Kelly.
+            from quant_shared.schemas.signals import UncalibratedSignalError
+            raise UncalibratedSignalError(
+                "position_size_from_signal: p_win_calibrated=False — "
+                "Kelly over uncalibrated p_win is blocked (Y-003 / R-02). "
+                "Calibrate OOS and pass p_win_calibrated=True."
+            )
         cap = capital or self.cfg.total_capital
         if stop_loss_pct <= 0 or p_win <= 0:
             return 0.0

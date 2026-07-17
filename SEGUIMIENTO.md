@@ -26,15 +26,18 @@ en vivo hasta pasar el gate y shadow trading.
 
 ---
 
-## 2. ESTADO ACTUAL (2026-06-10)
+## 2. ESTADO ACTUAL (2026-07-17)
 
-- **Peldaño:** DQN (escalera Q-table → DQN → PPO → SAC).
+- **Peldaño:** DQN (escalera Q-table → DQN → PPO → SAC). PPO/SAC **no promocionan** sin gate (Y-001).
 - **Infraestructura:** ✅ loader datos reales, ✅ env, ✅ entrenamiento, ✅ gate DSR
-  walk-forward paralelizado, ✅ reward mark-to-market (ADR-041).
-- **Último resultado serio:** agente con **señal real (DSR 0.85)** que **no bate
-  buy-and-hold** por reward desalineado → **arreglado en ADR-041**.
-- **Bloqueo / pendiente inmediato:** re-correr el gate SPY con `reward_mode="mtm"`
-  para comparar contra el `DSR 0.848 / Sharpe 0.553` anterior.
+  walk-forward, ✅ reward MTM (ADR-041), ✅ guards Kelly calibrado (Y-003/Y-004),
+  ✅ calibrador OOS en serve/train (A-003), ✅ `vol_target` del reward vivo (Y-002).
+- **Último resultado serio (pre-ajustes de hoy):** DSR ~0.85 pero **FAIL** vs B&H
+  (3 gates: SPY/BTC). Hipótesis direccional **formalmente muerta** (A-001).
+- **Bloqueo / pendiente inmediato:** 🔴 **reentrenar DQN + re-gate** tras Y-002
+  (reward cambió) y A-003 (p_win serve cambió). No promocionar checkpoints viejos.
+- **Docs de auditoría:** `docs/TRIAJE_FASE1_AUDITORIAS.md`, `docs/FIXLOG_FASE2.md`,
+  `docs/adr/044-promotion-gate-criteria.md`, `docs/governance/*`.
 
 ---
 
@@ -49,6 +52,22 @@ en vivo hasta pasar el gate y shadow trading.
 | 2026-06-10 | Paralelización de folds del gate (`--n-jobs`, spawn-safe, reproducible). |
 | 2026-06-10 | **Primer run serio** SPY: DQN DSR=0.85, no bate buy-and-hold. |
 | 2026-06-10 | **ADR-041**: reward mark-to-market (alinea train/eval). Implementado, 28 tests (commit `4447e07`). |
+| **2026-07-17** | **Triaje + Fase 1B + Fase 2 (fixes)** — ver §3.1 con horas. |
+
+### 3.1 Ajustes 2026-07-17 (horas locales UTC−05:00)
+
+| Hora | ID / tema | Ajuste | Evidencia / commit |
+|------|-----------|--------|--------------------|
+| ~12:00–13:00 | Fase 1B | Verificación en código del triaje; X-001: sizing **sí** tiene vol-target·Kelly·CVaR-lite; diagnóstico FABLE desactualizado. X-003: DSR ∈ [0,1]; 3 FAIL = Sharpe ≤ B&H. | `docs/TRIAJE_FASE1_AUDITORIAS.md` |
+| 13:42 | **Y-003** | Kelly en `AllocationEngine.position_size_from_signal` bloqueado si `p_win_calibrated=False`. | `ebf289b` |
+| 13:42 | **Y-004** | `translate_signal` no acepta Kelly/`position_size` sin `p_win_calibrated`. | `5727bfd` |
+| 13:42 | **Y-001** | PPO/SAC en `train_drl` salen con **exit 2** (no auto-promover sin gate). | `7017294` |
+| 13:42 | **A-001, D-001, X-003** | Decision Log: hipótesis direccional muerta; congelar multiagente; **ADR-044** criterio gate unívoco. | `f669db7` |
+| 13:42 | Docs | FIXLOG Fase 2 + triaje en `docs/`. | `0492ee8`, `5cb6dfb` |
+| 13:51 | **Y-002** 🔴 | Reward: `vol_target` fijo en config (default 0.01); ya no `= vol_realized`. **Invalida validación previa.** | `dd05bef` |
+| 13:51 | **A-003** 🔴 | Calibrador OOS cableado: sidecar + `from_checkpoint_calibrated`; `train_drl` guarda calibrador. **Cambia p_win serve.** | `5fdc375` |
+| 13:51–13:52 | Docs | FIXLOG + Decision Log actualizados (marca roja Y-002/A-003). | `2118c71`, `657aea1` |
+| 13:55+ | Push + SEGUIMIENTO | Push a GitHub + esta bitácora con horas. | este commit |
 
 ---
 
@@ -77,6 +96,21 @@ al fix estructural. Primero arreglar el reward y re-medir; tunear solo si hace f
 *Por qué:* tunear un reward mal diseñado desperdicia cómputo — el método más
 eficiente es arreglar la causa raíz antes de optimizar los detalles.
 
+**2026-07-17 — Gobernanza post-triaje (A-001 / D-001 / ADR-044).**
+*Qué:* matar formalmente `stock.position.dqn_directional`; congelar multiagente
+hasta un agente con gate PASS; documentar criterio de promoción (DSR > θ **y**
+Sharpe > B&H **y** DSR > XGB; DSR es probabilidad ∈ [0,1]).
+*Por qué:* 3 gates fallidos por B&H; construir 168 agentes sin edge es scope creep.
+
+**2026-07-17 — Guards de capital (Y-003 / Y-004).**
+*Qué:* no Kelly ni `position_size` sin `p_win_calibrated=True`.
+*Por qué:* softmax de Q no es frecuencia; Kelly sobre pseudo-proba = sizing distorsionado.
+
+**2026-07-17 — Y-002 / A-003 (marca roja).**
+*Qué:* vol-target del reward vivo; calibrador OOS en path de serve/train.
+*Por qué:* bugs/gaps reales en código. *Consecuencia:* hay que **reentrenar y
+re-gate**; no reutilizar métricas de runs anteriores como evidencia de edge.
+
 ---
 
 ## 5. ERRORES COMETIDOS Y LECCIONES (para NO repetir)
@@ -91,6 +125,10 @@ eficiente es arreglar la causa raíz antes de optimizar los detalles.
 | **Credenciales placeholder** | Se corrió con `ALPACA_API_KEY="tu_key"` literal → 401. | Confirmar que las keys reales estén cargadas (`$env:...Substring(0,4)`) antes de lanzar. |
 | **Perder el output al reiniciar Cursor** | La terminal de Cursor borra el scrollback al reiniciar; se perdió un run. | Correr en ventana aparte y/o `\| Tee-Object archivo.txt`. El código siempre está en git; solo se pierde la pantalla. |
 | **Sync lag de OneDrive** | `py_compile` daba SyntaxErrors falsos en archivos recién editados. | El mount tarda en sincronizar; verificar con la herramienta de lectura autoritativa, no con compilaciones inmediatas. |
+| **vol_target = vol_realized (Y-002)** | El término `w_vol` del reward era siempre 0. | Nunca anclar el target de una penalización al valor realizado de la misma barra. |
+| **p_win sin calibrar en Kelly (Y-003/4)** | Platform podía dimensionar con softmax crudo. | Guard R-02: calibración OOS obligatoria antes de Kelly. |
+| **PPO/SAC edge=True (Y-001)** | Entrenar sin gate se reportaba como éxito promocionable. | Sin juez OOS → exit 2 (no promover). |
+| **Docs que se auto-elogian (X-004)** | Auditoría y diagnóstico compartían narrativa del fix ADR-041. | Código + tests independientes; no confiar solo en prosa. |
 
 ---
 
@@ -103,19 +141,19 @@ eficiente es arreglar la causa raíz antes de optimizar los detalles.
 | SPY single-split B | 2018-2026 | DQN 500ep | OOS −11.26 | Inestable (un split) |
 | **SPY gate** | 2018-2026 | DQN 3 folds × 500ep | **DSR 0.848, Sharpe 0.553** vs buyhold 1.325, xgb 0.284 | **FAIL** (señal real, no bate pasivo) |
 | SPY gate + reward MTM | 2018-2026 | DQN 3 folds × 500ep | *pendiente* | *pendiente* |
+| BTC gate | ~2018-2026 | DQN 3 folds × 500ep | Sharpe 0.443 vs B&H 0.818, DSR≈0.84 | **FAIL** (B&H) |
+| Post Y-002/A-003 | — | reward + calibrador nuevos | *no corrido* | **re-gate obligatorio** |
 
 ---
 
 ## 7. PRÓXIMOS PASOS
 
-1. **[INMEDIATO]** Re-correr el gate SPY con `reward_mode="mtm"`. ¿Cierra la brecha
-   contra buy-and-hold? (necesita un entorno con torch).
-2. **[EN PARALELO]** Sonda multi-régimen: gate sobre BTC/USD (donde buy-and-hold no
-   es un Sharpe 1.3) para ver si el edge aparece donde el pasivo no domina.
-3. **[SI HACE FALTA]** Optuna sobre los pesos del reward (`w_ret, w_cost, ...`), con
-   embudo proxy-barato → gate-caro y deflación honesta del DSR.
-4. **[DESPUÉS]** Subir el peldaño a PPO (acción continua / sizing fraccional) si DQN
-   se queda corto.
+1. **[INMEDIATO / 🔴]** Reentrenar DQN y re-correr gate SPY (y/o BTC) **después de
+   Y-002 + A-003**. Criterio = ADR-044 (3 condiciones). Checkpoints viejos no valen.
+2. **[HIPÓTESIS]** No insistir en direccional-diario índices: pivote market-neutral /
+   stat-arb (ADR-043) u otra tesis falsable.
+3. **[SI HACE FALTA]** Optuna sobre pesos del reward solo **tras** un re-gate limpio.
+4. **[DESPUÉS]** PPO/SAC solo cuando exista gate DSR para esos algos (hoy exit 2).
 
 ---
 
